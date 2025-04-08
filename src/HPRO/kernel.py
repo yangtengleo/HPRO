@@ -199,6 +199,9 @@ class PW2AOkernel:
         projR.calc_phiQ(ecut * 1.1)
 
         # Get orbital pairs
+        # orbpairs1 saves pairs of AO basis and AO basis
+        # orbpairs2 saves pairs of projector basis and AO basis
+        # orbpairs3 saves pairs of AO basis and AO basis, for kinetic energy
         orbpairs1, orbpairs2, orbpairs3 = {}, {}, {}
         stru = self.structure
         for ispc in range(stru.nspc):
@@ -265,9 +268,12 @@ class PW2AOkernel:
             grids_site = []
             for iorb in range(basis.norb_spc[spc]):
                 obr = basis.phirgrids_spc[spc][iorb].rcut
+                # grids_site stores the non-zero grid points index for each atomic orbital
                 grids_site.append(GridPoints.find(rprimFFT, obr, poscart))
             grids_site_orb.append(grids_site)
 
+        # create the index for each atom pair (i, j) + translational vectors
+        # in order to process atom pairs of the same kind in batch
         xs2 = pairs_to_indices(olp_proj_ao.structure, trans, atoms)
         argsort = np.argsort(xs2, kind='stable')
         xs2 = xs2[argsort]
