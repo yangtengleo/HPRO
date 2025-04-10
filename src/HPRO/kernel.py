@@ -235,6 +235,7 @@ class PW2AOkernel:
             # skip this step if overlaps_only and using NCPP
             olp_proj_ao = calc_overlap(projR, orbpairs2, basis, Ecut=ecut)
         
+        # mats0 stores the non-local potential of each AO basis, with multiple repeated atom pairs
         trans, atoms, mats0 = get_mat0(olp_proj_ao, funch)
 
         assert funcg is None
@@ -274,6 +275,7 @@ class PW2AOkernel:
 
         # create the index for each atom pair (i, j) + translational vectors
         # in order to process atom pairs of the same kind in batch
+        # npairs2 means how many different kinds of atom pairs in total 
         xs2 = pairs_to_indices(olp_proj_ao.structure, trans, atoms)
         argsort = np.argsort(xs2, kind='stable')
         xs2 = xs2[argsort]
@@ -290,6 +292,7 @@ class PW2AOkernel:
         constructH(self, vlocr, basis, FFTgrid, rprimFFT, dvol, grids_site_orb, Hmain)
 
         # Collect matrices into one object
+        # mats2 sums contribution from the same atom pairs together
         mats2 = []
         for ipair in range(npairs2):
             slice_thispair = slice(slice2[ipair], slice2[ipair+1])
@@ -302,6 +305,7 @@ class PW2AOkernel:
         Hcorr.duplicate()
         
         # Sum up all the terms
+        # addition and subtraction are overloaded in MatLCAO._add_sub() 
         hamiltonians = Hkin + Hmain + Hcorr
 
         if cutoffs is not None:
