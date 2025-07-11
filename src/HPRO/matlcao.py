@@ -526,6 +526,8 @@ def pwc(structure, cutoffs, cutoffs2=None):
     distance_tol1 = np.array([cutoffs[atom_names[i]] for i in range(natom)]) # [natom]
     distance_tol2 = np.array([cutoffs2[atom_names[i]] for i in range(natom)]) 
 
+    # translations store translation vectors T of all valid atom pairs
+    # atom_pairs store all valid atom pairs (i, j), where i is atom within unit cell, j is copied neighbor atom
     translations = []
     atom_pairs = []
     # from tqdm import tqdm
@@ -534,7 +536,7 @@ def pwc(structure, cutoffs, cutoffs2=None):
         distance_tol = distance_tol1[iatom] + distance_tol2
         distance_tol = distance_tol[None, :, None]
         diff_cart = all_atoms_cart_2 - atom_pos_cart[iatom]
-        # first select a square box
+        # first coarselyselect a square box
         # filter all points with x, y, z < cutoff, within_box is (translation_idx, jatom_idx)
         within_box = np.where(np.all(np.abs(diff_cart) <= distance_tol, axis=2))
         # translations_inbox is (m, 3), where m is the number of picked translations
@@ -545,7 +547,7 @@ def pwc(structure, cutoffs, cutoffs2=None):
         atom_pairs_inbox[:, 1] = within_box[1]
         diff_cart = diff_cart[within_box[0], within_box[1], :]
         distance_tol = distance_tol[0, within_box[1], 0]
-        # then select a ball within the box
+        # then finely select valid atom pairs within the cutoff ball 
         pair_distance = np.linalg.norm(diff_cart, axis=1)
         within_cutoff = pair_distance <= distance_tol
         translations.append(translations_inbox[within_cutoff, :])
@@ -553,7 +555,7 @@ def pwc(structure, cutoffs, cutoffs2=None):
     
     translations = np.concatenate(translations, axis=0)
     atom_pairs = np.concatenate(atom_pairs, axis=0)
- 
+
     translations = structure.trans_uc_to_original(translations, atom_pairs[:, 0], atom_pairs[:, 1])
     
     return PairsInfo(structure, translations, atom_pairs)
