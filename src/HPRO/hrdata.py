@@ -63,13 +63,13 @@ def constructH(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site_orb, Hmai
                 slice2 = slice(basis.orbslices_spc[spc2][jorb],
                             basis.orbslices_spc[spc2][jorb+1])
                 grid2 = grids_site_orb[atm2][jorb].translate(Hmain.translations[ipair]*FFTgrid)
-                # plsgrid stores indices of non-zero values for both grid1 and grid2, seperate in x, y, z directions
+                # plsgrid stores overlapping region of grid1 and grid2
                 plsgrid = GridPoints.pls(grid1, grid2)
                 if plsgrid.null():
                     Hmain.mats[ipair][slice1, slice2] = 0.
                     continue
-                # plslcd is (N, 3) array, where N is the number of points with non-zero values
-                # each row is the point index (ix, iy, iz) in the 3D FFT grid 
+                # plslcd is (N, 3) array, where N is the number of overlapping grid points,
+                # each row is the point index (ix, iy, iz) in the global grid 
                 plslcd = plsgrid.lcd()
                 assert plslcd.shape[0]>0
                 assert len(plslcd.shape)==2
