@@ -55,6 +55,7 @@ class LCAOData:
         
         self.ls_spc = {}
         self.phirgrids_spc = {}
+        self.grad_phirgrids_spc = {}
         self.norb_spc = {}
         self.funch_spc = {}
         self.Qij_spc = {}
@@ -65,7 +66,7 @@ class LCAOData:
             funch, Qij = None, None
             # if spc_nu not in self.orbitals_types:
             if aocode == 'siesta':
-                norb, phirgrids = parse_siesta_ion(f'{basis_path_root}/{spc_na}.ion')
+                norb, phirgrids, grad_phirgrids = parse_siesta_ion(f'{basis_path_root}/{spc_na}.ion')
             elif aocode == 'gpaw':
                 norb, phirgrids = parse_gpaw_basis(findfile(basis_path_root, f'^{spc_na}\..*\.basis$'))
             elif aocode == 'qe-projR':
@@ -85,6 +86,7 @@ class LCAOData:
                 orbitals_argsort = list(range(len(phirgrids)))
             
             self.phirgrids_spc[spc_nu] = [phirgrids[i] for i in orbitals_argsort]
+            self.grad_phirgrids_spc[spc_nu] = [grad_phirgrids[i] for i in orbitals_argsort]
             self.ls_spc[spc_nu] = [phirgrids[i].l for i in orbitals_argsort]
             self.norb_spc[spc_nu] = norb
 

@@ -281,14 +281,14 @@ class PW2AOkernel:
         xs2 = xs2[argsort]
         slice2 = slice_same(xs2)
         npairs2 = len(slice2) - 1
-        
-        Hmain = MatLCAO.setc(olp_basis.get_pairs_ij(), basis, filling_value=0., dtype='f8')
-        Hmain.shuffle()
 
         # Calculate kinetic energy
         Hkin = calc_overlap(basis, orbpairs3, Ecut=ecut)
 
-        # Construct Hamiltonian under atomic orbital basis in real space
+        # Calculate <phi|V|phi> by integral of real-space grids
+        # Calculate <phi|V|dphi> as well
+        Hmain = MatLCAO.setc_phiVdphi(olp_basis.get_pairs_ij(), basis, filling_value=0., dtype='f8')
+        Hmain.shuffle()
         constructH(self, vlocr, basis, FFTgrid, rprimFFT, dvol, grids_site_orb, Hmain)
 
         # Collect matrices into one object

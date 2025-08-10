@@ -159,9 +159,10 @@ class MatLCAO(PairsInfo):
         lcaodata1 (LCAOData): Information for basis functions on the left of the matrix.
         lcaodata2 (LCAOData, optional): Information for basis functions on the right of the matrix. Defaults to lcaodata1 if not provided.
     '''
-    def __init__(self, structure, translations, atom_pairs, mats, lcaodata1, lcaodata2=None):
+    def __init__(self, structure, translations, atom_pairs, mats, lcaodata1, lcaodata2=None, mats_phiVdphi=None):
         super(MatLCAO, self).__init__(structure, translations, atom_pairs)
         self.mats = mats
+        self.mats_phiVdphi = mats_phiVdphi if mats_phiVdphi is not None else None
         self.lcaodata1 = lcaodata1
         self.lcaodata2 = lcaodata2 if lcaodata2 is not None else lcaodata1
         assert self.lcaodata1.structure == self.lcaodata2.structure == self.structure
@@ -174,6 +175,13 @@ class MatLCAO(PairsInfo):
         Create MatLCAO object using pairs.
         '''
         return cls(pairs.structure, pairs.translations, pairs.atom_pairs, mats, lcaodata1, lcaodata2=lcaodata2)
+    
+    @classmethod
+    def from_pairs_phiVdphi(cls, pairs, mats, mats_phiVdphi, lcaodata1, lcaodata2=None):
+        '''
+        Create MatLCAO and MatLCAO_phiVdphi objects using pairs.
+        '''
+        return cls(pairs.structure, pairs.translations, pairs.atom_pairs, mats, lcaodata1, lcaodata2=lcaodata2, mats_phiVdphi=mats_phiVdphi)
     
     def slice(self, val, new_indices=None):
         '''
@@ -237,6 +245,27 @@ class MatLCAO(PairsInfo):
             else:
                 mats.append(None)
         return cls.from_pairs(pairs, mats, lcaodata1, lcaodata2=lcaodata2)
+    
+    @classmethod
+    def setc_phiVdphi(cls, pairs, lcaodata1, lcaodata2=None, filling_value=0, dtype=np.complex128):
+        """
+        Generate the MatLCAO object with proper error handling, together with <phi|V|dphi>.
+        """
+        if lcaodata2 is None:
+            lcaodata2 = lcaodata1
+        atom_nbrs = pairs.structure.atomic_numbers
+        mats = []
+        mats_phiVdphi = []
+        for ipair in range(pairs.npairs):
+            if filling_value is not None:
+                size1 = lcaodata1.orbslices_spc[atom_nbrs[pairs.atom_pairs[ipair, 0]]][-1]
+                size2 = lcaodata2.orbslices_spc[atom_nbrs[pairs.atom_pairs[ipair, 1]]][-1]
+                mats.append(np.full((size1, size2), filling_value, dtype=dtype))
+                mats_phiVdphi.append(np.full((size1, size2, 3), filling_value, dtype=dtype))
+            else:
+                mats.append(None)
+                mats_phiVdphi.append(None)
+        return cls.from_pairs_phiVdphi(pairs, mats, mats_phiVdphi, lcaodata1, lcaodata2=lcaodata2)
     
     def delete_mats(self):
         self.mats = [None for _ in range(self.npairs)]
