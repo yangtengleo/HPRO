@@ -290,6 +290,7 @@ class PW2AOkernel:
         Hmain = MatLCAO.setc_phiVdphi(olp_basis.get_pairs_ij(), basis, filling_value=0., dtype='f8')
         Hmain.shuffle()
         constructH(self, vlocr, basis, FFTgrid, rprimFFT, dvol, grids_site_orb, Hmain)
+        Hmain.duplicate()
 
         # Collect matrices into one object
         # mats2 sums contribution from the same atom pairs together
@@ -299,8 +300,6 @@ class PW2AOkernel:
             mats2.append(np.sum([mats0[i] for i in argsort[slice_thispair]], axis=0))
         xs3 = np.unique(xs2)
         trans3, atms3 = indices_to_pairs(olp_proj_ao.structure.natom, xs3)
-        Hmain.duplicate()
-        
         Hcorr = MatLCAO(olp_proj_ao.structure, trans3, atms3, mats2, olp_proj_ao.lcaodata2)
         Hcorr.duplicate()
         
