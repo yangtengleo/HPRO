@@ -68,6 +68,7 @@ def constructH(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site_orb, Hmai
                 plsgrid = GridPoints.pls(grid1, grid2)
                 if plsgrid.null():
                     Hmain.mats[ipair][slice1, slice2] = 0.
+                    Hmain.mats_phiVdphi[ipair][slice1, slice2, :] = 0.
                     continue
                 # plslcd is (N, 3) array, where N is the number of overlapping grid points,
                 # each row is the point index (ix, iy, iz) in the global grid 
@@ -80,8 +81,8 @@ def constructH(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site_orb, Hmai
                 phi1 = phirgrid1.generate3D_noselect(plscrt - item.structure.atomic_positions_cart[atm1])
                 phi2 = phirgrid2.generate3D_noselect(plscrt - item.structure.atomic_positions_cart[atm2] -
                                                 Hmain.translations[ipair] @ item.structure.rprim)
-                grad_phi2 = grad_phirgrid2.generate3D_noselect(plscrt - item.structure.atomic_positions_cart[atm2] -
-                                                                Hmain.translations[ipair] @ item.structure.rprim)
+                grad_phi2 = grad_phirgrid2.generate3D_grad(plscrt - item.structure.atomic_positions_cart[atm2] -
+                                                            Hmain.translations[ipair] @ item.structure.rprim)
                 # t.stop()
                 plslcd_uc = np.divmod(plslcd, FFTgrid[None, :])[1]
                 x_uc, y_uc, z_uc = plslcd_uc[:, 0], plslcd_uc[:, 1], plslcd_uc[:, 2]
@@ -89,7 +90,7 @@ def constructH(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site_orb, Hmai
                 mat = np.sum(f2[:, None, None] * phi1[:, :, None] * phi2[:, None, :], axis=0)
                 mat_phiVdphi = np.sum(f2[:, None, None, None] * phi1[:, :, None, None] * grad_phi2[:, None, :, :], axis=0)
                 Hmain.mats[ipair][slice1, slice2] = mat * votk
-                Hmain.mats_phiVdphi[ipair][slice1, slice2] = mat_phiVdphi * votk
+                Hmain.mats_phiVdphi[ipair][slice1, slice2, :] = mat_phiVdphi * votk
 
 def calc_vkb(olp_proj_ao, Dij=None):
     '''
