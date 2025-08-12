@@ -223,7 +223,7 @@ class MatLCAO(PairsInfo):
                 if self.mats_phiVdphi[ipair] is None:
                     self.mats_phiVdphi.append(None)
                 else:
-                    self.mats_phiVdphi.append(self.mats_dphiVphi[ipair].copy())
+                    self.mats_phiVdphi.append(np.swapaxes(self.mats_dphiVphi[ipair], 0, 1).copy())
         translations_new = np.concatenate((self.translations, 
                                            translations_inv[not_redundant]), axis=0)
         atom_pairs_new = np.concatenate((self.atom_pairs,

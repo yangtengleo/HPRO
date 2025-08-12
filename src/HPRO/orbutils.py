@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
 from math import pi
 import numpy as np
+import copy
 from scipy.integrate import simpson
 from scipy.interpolate import CubicSpline
 import scipy.special as sp
@@ -281,12 +282,12 @@ def parse_siesta_ion(filename):
             line = ionfile.readline()
             assert line.split()[0] == '500'
             
-            phirgrid = np.zeros((2, 500)) # r, R(r)
             grad_phirgrid = np.zeros((2, 500)) # r, R(r)/r^l
             for ipt in range(500):
                 grad_phirgrid[:, ipt] = list(map(float, ionfile.readline().split()))
             # found this from sisl/io/siesta/siesta_nc.py: ncSileSiesta.read_basis(self): 
             # sorb = SphericalOrbital(l, (r * Bohr2Ang, psi), orb_q0[io])
+            phirgrid = copy.deepcopy(grad_phirgrid) # r, R(r)
             phirgrid[1, :] *= np.power(grad_phirgrid[0, :], l) 
             rgd = LinearRGD.from_explicit_grid(phirgrid[0])
             phirgrids.append(GridFunc(rgd, phirgrid[1], l=l))

@@ -72,6 +72,7 @@ class LCAOData:
             elif aocode == 'qe-projR':
                 funch, phirgrids = read_upf(findfile(basis_path_root, f'^{spc_na}\.(upf|UPF)$'))
                 norb = len(phirgrids)
+                grad_phirgrids = [None for _ in range(norb)]
             elif aocode == 'deeph':
                 break # handle it later
             else:

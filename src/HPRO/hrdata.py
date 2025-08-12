@@ -90,7 +90,7 @@ def constructH(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site_orb, Hmai
                 x_uc, y_uc, z_uc = plslcd_uc[:, 0], plslcd_uc[:, 1], plslcd_uc[:, 2]
                 f2 = vlocr[x_uc, y_uc, z_uc]
                 mat = np.sum(f2[:, None, None] * phi1[:, :, None] * phi2[:, None, :], axis=0)
-                mat_dphiVphi = np.sum(f2[:, None, None, None] * phi2[:, :, None, None] * grad_phi1[:, None, :, :], axis=0)
+                mat_dphiVphi = np.sum(f2[:, None, None, None] * grad_phi1[:, :, None, :] * phi2[:, None, :, None], axis=0)
                 mat_phiVdphi = np.sum(f2[:, None, None, None] * phi1[:, :, None, None] * grad_phi2[:, None, :, :], axis=0)
                 Hmain.mats[ipair][slice1, slice2] = mat * votk
                 Hmain.mats_dphiVphi[ipair][slice1, slice2, :] = mat_dphiVphi * votk
