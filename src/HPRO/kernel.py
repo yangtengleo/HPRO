@@ -4,7 +4,7 @@ import numpy as np
 from .structure import Structure, load_structure
 from .lcaodata import LCAOData
 from .hrdata import read_hrr, read_vloc, constructH
-from .deephio import save_structure_deeph, save_mat_deeph, get_mat0
+from .deephio import save_structure_deeph, save_mat_deeph, save_phiVdphi_deeph, get_mat0
 from .utils import mpi_watch, simple_timer, is_master, comm, slice_same
 from .twocenter import calc_overlap
 from .orbutils import OrbPair
@@ -316,6 +316,8 @@ class PW2AOkernel:
         if is_master():
             print('Writing Hamiltonian matrices to disk')
             save_mat_deeph(savedir, hamiltonians, filename='hamiltonians.h5', energy_unit=True)
+            print('Writing phiVdphi matrices to disk')
+            save_phiVdphi_deeph(savedir, Hmain, filename='phiVdphi.h5', energy_unit=True)
 
         if comm is not None:
             comm.Barrier()
