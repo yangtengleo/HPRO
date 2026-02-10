@@ -1,4 +1,5 @@
 import numpy as np
+import copy
 from scipy.sparse import csr_matrix
 
 from .constants import hpro_rng
@@ -163,6 +164,7 @@ class MatLCAO(PairsInfo):
         super(MatLCAO, self).__init__(structure, translations, atom_pairs)
         self.mats = mats
         self.mats_phiVdphi = mats_phiVdphi if mats_phiVdphi is not None else None
+        self.mats_dphiVphi = copy.deepcopy(mats_phiVdphi) if mats_phiVdphi is not None else None
         self.lcaodata1 = lcaodata1
         self.lcaodata2 = lcaodata2 if lcaodata2 is not None else lcaodata1
         assert self.lcaodata1.structure == self.lcaodata2.structure == self.structure
@@ -218,6 +220,10 @@ class MatLCAO(PairsInfo):
                     self.mats.append(self.mats[ipair].T.copy())
                 else:
                     self.mats.append(self.mats[ipair].T.conj())
+                if self.mats_phiVdphi[ipair] is None:
+                    self.mats_phiVdphi.append(None)
+                else:
+                    self.mats_phiVdphi.append(self.mats_dphiVphi[ipair].copy())
         translations_new = np.concatenate((self.translations, 
                                            translations_inv[not_redundant]), axis=0)
         atom_pairs_new = np.concatenate((self.atom_pairs,

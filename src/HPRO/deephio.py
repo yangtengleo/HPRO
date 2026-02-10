@@ -85,6 +85,32 @@ def save_mat_deeph(savedir, matlcao, filename='hamiltonians.h5', energy_unit=Tru
     
     h5file.close()
 
+def save_phiVdphi_deeph(savedir, matlcao, filename='phiVdphi.h5', energy_unit=True):
+
+    lcaodata = matlcao.lcaodata1
+    os.makedirs(savedir, exist_ok=True)
+    atom_nbrs = lcaodata.structure.atomic_numbers
+    ls_spc = lcaodata.ls_spc
+    
+    # here real spherical harmonics follow wikipedia convention, need to convert to openmx convension
+    orbitals_Us_openmx2wiki = get_Us_openmx2wiki(ls_spc)
+    h5file = h5py.File(f'{savedir}/{filename}', 'w', libver='latest')
+
+    # from tqdm import tqdm
+    # for ipair in tqdm(range(matlcao.npairs)):
+    for ipair in range(matlcao.npairs):
+        spc1 = atom_nbrs[matlcao.atom_pairs[ipair, 0]]
+        spc2 = atom_nbrs[matlcao.atom_pairs[ipair, 1]]
+        U1 = orbitals_Us_openmx2wiki[spc1]
+        U2 = orbitals_Us_openmx2wiki[spc2]
+        key = matlcao.get_keystr(ipair)
+        mat = np.einsum('ia,abk,bj->ijk', U1.T, matlcao.mats_phiVdphi[ipair], U2)
+        if energy_unit:
+            mat *= hartree2ev / bohr2ang
+        h5file[key] = mat
+    
+    h5file.close()
+
 def get_mat0(ao_data, funch=None):
     for ih in range(len(funch)):
         h = funch[ih]
