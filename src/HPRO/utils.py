@@ -11,6 +11,13 @@ import numpy as np
 
 comm = None
 MPI = None
+try:
+    from mpi4py import MPI as _MPI
+    MPI = _MPI
+    comm = MPI.COMM_WORLD
+except ModuleNotFoundError:
+    MPI = None
+    comm = None
 
 def is_master(comm=comm):
     return comm is None or comm.rank == 0

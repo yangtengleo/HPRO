@@ -5,7 +5,7 @@ import h5py
 
 from .bgwio import bgw_vsc
 from .lcaodata import LCAOData
-from .utils import slice_same, tqdm_mpi_tofile
+from .utils import slice_same, tqdm_mpi_tofile, distrib_vec, is_master, comm, MPI
 from .matlcao import pairs_to_indices, indices_to_pairs, MatLCAO
 from .gridintg import GridPoints
 from .mathutils import r_to_xyz
@@ -34,7 +34,6 @@ def read_vloc(filename, interface):
         vlocr = vlocr.real
     else:
         raise NotImplementedError(f'Unknown vloc interface: {interface}')
-    print('Real space grid dimensions: (' + ' '.join(f'{vlocr.shape[i]:5d}' for i in range(3)) + ')\n')
     '''
     h5file = h5py.File(f'./vlocr_qe.h5', 'w', libver='latest')
     h5file['vlocr_qe'] = vlocr
@@ -78,7 +77,11 @@ def constructH(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site_orb, Hmai
     Build Hamiltonian operator in atomic orbital basis according to the formula:
     H_{i\alpha,j\beta} = \langle \phi_{i\alpha} | -\frac{1}{2}\nabla^2 | \phi_{j\beta} \rangle + \int \mathrm{d}^3r\, \phi_{i\alpha}^*(\boldsymbol{r}) V_\text{eff}(\boldsymbol{r}) \phi_{j\beta}(\boldsymbol{r}) + \sum_{a\gamma\delta} \langle \phi_{i\alpha} | p_{a\gamma} \rangle D_{a\gamma\delta} \langle p_{a\delta} | \phi_{j\beta} \rangle
     '''
-    print(f'\nConstructing Hamiltonian operator with {Hmain.npairs} blocks')
+    if is_master():
+        print(f'\nConstructing Hamiltonian operator with {Hmain.npairs} blocks')
+    rank, count_pairs, displ_pairs = distrib_vec(Hmain.npairs, displ_last_elem=True, comm=comm)
+    displ_istart = displ_pairs[rank]
+    displ_iend = displ_pairs[rank + 1]
     '''
     # ======== test paramters ============
     TEST_T = np.array([-1, -1, 0], dtype=int) 
@@ -102,7 +105,7 @@ def constructH(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site_orb, Hmai
         d = np.maximum(0.0, np.maximum(lo - p, p - hi))
         return float(np.linalg.norm(d))
     '''
-    for ipair in tqdm_mpi_tofile(range(Hmain.npairs)):
+    for ipair in tqdm_mpi_tofile(range(displ_istart, displ_iend), total=count_pairs[rank]):
         atm1, atm2 = Hmain.atom_pairs[ipair]
         spc1, spc2 = item.structure.atomic_numbers[atm1], item.structure.atomic_numbers[atm2]
         '''
@@ -250,6 +253,11 @@ def constructH(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site_orb, Hmai
                 Hmain.mats[ipair][slice1, slice2] = mat * votk
                 Hmain.mats_dphiVphi[ipair][slice1, slice2, :] = mat_dphiVphi * votk
                 Hmain.mats_phiVdphi[ipair][slice1, slice2, :] = mat_phiVdphi * votk
+    if comm is not None:
+        for ipair in range(Hmain.npairs):
+            comm.Allreduce(MPI.IN_PLACE, Hmain.mats[ipair], op=MPI.SUM)
+            comm.Allreduce(MPI.IN_PLACE, Hmain.mats_dphiVphi[ipair], op=MPI.SUM)
+            comm.Allreduce(MPI.IN_PLACE, Hmain.mats_phiVdphi[ipair], op=MPI.SUM)            
 
 def calc_vkb(olp_proj_ao, Dij=None):
     '''
