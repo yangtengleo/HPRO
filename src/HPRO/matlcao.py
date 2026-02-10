@@ -510,6 +510,8 @@ def pwc(structure, cutoffs, cutoffs2=None):
 
     maxr = max(max(cutoffs.values()), max(cutoffs2.values()))
     # unit cell "thickness" is 1/|G_i|
+    # max extended distance is 2 * maxr
+    # max extended number of unit cell is max_n_extend, for each direction
     max_n_extend = np.floor(2 * maxr * np.linalg.norm(gprim, axis=-1) + 1).astype(int) # [3]
 
     all_translations_2 = np.stack(np.meshgrid(np.arange(-max_n_extend[0], max_n_extend[0]+1, 1),
@@ -532,8 +534,11 @@ def pwc(structure, cutoffs, cutoffs2=None):
         distance_tol = distance_tol[None, :, None]
         diff_cart = all_atoms_cart_2 - atom_pos_cart[iatom]
         # first select a square box
+        # filter all points with x, y, z < cutoff, within_box is (translation_idx, jatom_idx)
         within_box = np.where(np.all(np.abs(diff_cart) <= distance_tol, axis=2))
+        # translations_inbox is (m, 3), where m is the number of picked translations
         translations_inbox = all_translations_2[within_box[0], :]
+        # atom_pairs_inbox is (m, 2), saves picked atom pairs (iatom_idx, jatom_idx)
         atom_pairs_inbox = np.empty((translations_inbox.shape[0], 2), dtype='i8')
         atom_pairs_inbox[:, 0] = iatom
         atom_pairs_inbox[:, 1] = within_box[1]
