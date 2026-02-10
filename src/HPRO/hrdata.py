@@ -58,6 +58,7 @@ def constructH(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site_orb, Hmai
             grid1 = grids_site_orb[atm1][iorb]
             for jorb in range(basis.norb_spc[spc2]):
                 phirgrid2 = basis.phirgrids_spc[spc2][jorb]
+                grad_phirgrid2 = basis.grad_phirgrids_spc[spc2][jorb]
                 slice1 = slice(basis.orbslices_spc[spc1][iorb],
                             basis.orbslices_spc[spc1][iorb+1])
                 slice2 = slice(basis.orbslices_spc[spc2][jorb],
@@ -79,12 +80,16 @@ def constructH(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site_orb, Hmai
                 phi1 = phirgrid1.generate3D_noselect(plscrt - item.structure.atomic_positions_cart[atm1])
                 phi2 = phirgrid2.generate3D_noselect(plscrt - item.structure.atomic_positions_cart[atm2] -
                                                 Hmain.translations[ipair] @ item.structure.rprim)
+                grad_phi2 = grad_phirgrid2.generate3D_noselect(plscrt - item.structure.atomic_positions_cart[atm2] -
+                                                                Hmain.translations[ipair] @ item.structure.rprim)
                 # t.stop()
                 plslcd_uc = np.divmod(plslcd, FFTgrid[None, :])[1]
                 x_uc, y_uc, z_uc = plslcd_uc[:, 0], plslcd_uc[:, 1], plslcd_uc[:, 2]
                 f2 = vlocr[x_uc, y_uc, z_uc]
                 mat = np.sum(f2[:, None, None] * phi1[:, :, None] * phi2[:, None, :], axis=0)
+                mat_phiVdphi = np.sum(f2[:, None, None, None] * phi1[:, :, None, None] * grad_phi2[:, None, :, :], axis=0)
                 Hmain.mats[ipair][slice1, slice2] = mat * votk
+                Hmain.mats_phiVdphi[ipair][slice1, slice2] = mat_phiVdphi * votk
 
 def calc_vkb(olp_proj_ao, Dij=None):
     '''

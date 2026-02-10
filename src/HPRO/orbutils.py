@@ -65,6 +65,11 @@ class GridFunc:
         Ylm = spharm_xyz(self.l, x, y, z)
         Rlm = self.generate(Rnorm)
         return Rlm[:, None] * Ylm[:, :]
+    
+    def generatexyz_grad(self, Rnorm, x, y, z):
+        Ylm = spharm_xyz(self.l, x, y, z)
+        Rlm = self.generate(Rnorm)
+        return Rlm[:, None] * Ylm[:, :]
 
     def generate3D(self, Rvec):
         '''
@@ -238,6 +243,7 @@ def grid_R2G(Ggrid, gridfuncR, return_real=True):
 def parse_siesta_ion(filename):
     
     phirgrids = []
+    grad_phirgrids = []
     norb = 0
     
     ionfile = open(filename, 'r')
@@ -252,18 +258,19 @@ def parse_siesta_ion(filename):
             assert line.split()[0] == '500'
             
             phirgrid = np.zeros((2, 500)) # r, R(r)
+            grad_phirgrid = np.zeros((2, 500)) # r, R(r)/r^l
             for ipt in range(500):
-                phirgrid[:, ipt] = list(map(float, ionfile.readline().split()))
+                grad_phirgrid[:, ipt] = list(map(float, ionfile.readline().split()))
             # found this from sisl/io/siesta/siesta_nc.py: ncSileSiesta.read_basis(self): 
             # sorb = SphericalOrbital(l, (r * Bohr2Ang, psi), orb_q0[io])
-            phirgrid[1, :] *= np.power(phirgrid[0, :], l) 
+            phirgrid[1, :] *= np.power(grad_phirgrid[0, :], l) 
             rgd = LinearRGD.from_explicit_grid(phirgrid[0])
             phirgrids.append(GridFunc(rgd, phirgrid[1], l=l))
-                
+            grad_phirgrids.append(GridFunc(rgd, grad_phirgrid[1], l=l))
         line = ionfile.readline()
     ionfile.close()
-    
-    return norb, phirgrids
+
+    return norb, phirgrids, grad_phirgrids
 
 
 def parse_gpaw_basis(filename):
