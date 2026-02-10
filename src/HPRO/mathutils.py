@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.special as sp
-from math import factorial, sqrt, pi
+from math import factorial, sqrt, pi, hypot
+from functools import lru_cache
 from .from_gpaw.spherical_harmonics import Y
 
 '''
@@ -21,12 +22,13 @@ def r_to_xyz(r):
     Returns:
         rnorm, x, y, z: x, y, z are normalized
     '''
-    eps = 1e-8
+    eps = 1e-9
     rnorm = np.linalg.norm(r, axis=-1)
-    x = r[..., 0] / (rnorm + eps/10)
-    y = r[..., 1] / (rnorm + eps/10)
-    z = r[..., 2] / (rnorm + eps/10)
-    
+    inv = 1.0 / np.maximum(rnorm, eps)
+    x = r[..., 0] * inv
+    y = r[..., 1] * inv
+    z = r[..., 2] * inv
+
     # r=0
     r_is_zero = rnorm < eps
     x[r_is_zero] = 0.0
@@ -44,18 +46,38 @@ def spharm_xyz(l, x, y, z):
         spharm[:, m+l] = Y(l**2+m+l, x, y, z)
     return spharm
 
-def _C_lm(l, m):
+SQRT2 = sqrt(2.0)
+
+@lru_cache(maxsize=None)
+def _C_row(l: int) -> np.ndarray:
     """
-    the real normalization factor of Y_lm in SIESTA 
+    returns the total row of C(l, m), length is 2l+1, index is m+l
+    the real normalization factor of Y_lm in SIESTA
     when m != 0, multiplied by sqrt(2)
-    when m is negative, the same as positive
+    m < 0 is equal to m > 0
     """
-    a = (2*l + 1) / (4.0 * pi)
-    b = factorial(l - abs(m)) / factorial(l + abs(m))
-    c = sqrt(a * b)
-    if m != 0:
-        c *= sqrt(2.0)
-    return c
+    row = np.empty(2*l + 1, dtype='f8')
+    base = (2*l + 1) / (4.0 * pi)
+    for m in range(-l, l+1):
+        am = abs(m)
+        c = sqrt(base * factorial(l - am) / factorial(l + am))
+        if am != 0:
+            c *= SQRT2
+        row[m + l] = c
+    return row
+
+_P_CACHE = {}
+_ZP_CACHE = {}
+
+def _get_P_ZP_cache(l: int):
+    P  = _P_CACHE.get(l)
+    ZP = _ZP_CACHE.get(l)
+    if P is None:
+        P  = np.empty((l+2, l+2), dtype='f8')
+        ZP = np.empty((l+1, l+1), dtype='f8')
+        _P_CACHE[l]  = P
+        _ZP_CACHE[l] = ZP
+    return P, ZP
 
 def rly_grly_single(l, r, x, y, z, tiny=1e-14):
     """
@@ -64,89 +86,65 @@ def rly_grly_single(l, r, x, y, z, tiny=1e-14):
         rly : (2l+1,)    —— r^l * Y_{lm}, where m = -l..l
         grly: (2l+1, 3)  —— ∇(r^l * Y_{lm}), x, y, z components
     """
+    C = _C_row(l)
     # special case: r = 0
     if r <= tiny:
         rly  = np.zeros((2*l + 1,), dtype='f8')
         grly = np.zeros((2*l + 1, 3), dtype='f8')
         if l == 0:
-            rly[l + 0] = _C_lm(0, 0)
+            rly[l + 0] = C[l + 0]
         elif l == 1:
-            c1 = _C_lm(1, -1)
-            c2 = _C_lm(1, 0)
-            c3 = _C_lm(1, 1)
+            C1, C2, C3 = C[l - 1], C[l + 0], C[l + 1]
             # m = -1: -c1 * y
-            grly[l - 1, 1] = -c1
+            grly[l - 1, 1] = -C1
             # m = 0:   c2 * z
-            grly[l + 0, 2] =  c2
+            grly[l + 0, 2] =  C2
             # m = +1: -c3 * x
-            grly[l + 1, 0] = -c3
+            grly[l + 1, 0] = -C3
         return rly, grly
     
     # explicit formula: l <= 2
     if l == 0:
         rly  = np.zeros((1,), dtype='f8')
         grly = np.zeros((1, 3), dtype='f8')
-        rly[0] = _C_lm(0, 0)
+        rly[0] = C[0]
         return rly, grly
 
     if l == 1:
         rly  = np.zeros((3,), dtype='f8')
         grly = np.zeros((3, 3), dtype='f8')
-        c1 = _C_lm(1, -1)
-        c2 = _C_lm(1, 0)
-        c3 = _C_lm(1, 1)
+        C1, C2, C3 = C[0], C[1], C[2]
         # m = -1: -c1 * y
-        rly[0]     = -c1 * y
-        grly[0, 1] = -c1
+        rly[0] = -C1 * y; grly[0, 1] = -C1
         # m = 0:   c2 * z
-        rly[1]     =  c2 * z
-        grly[1, 2] =  c2
+        rly[1] =  C2 * z; grly[1, 2] =  C2
         # m = +1: -c3 * x
-        rly[2]     = -c3 * x
-        grly[2, 0] = -c3
+        rly[2] = -C3 * x; grly[2, 0] = -C3
         return rly, grly
 
     if l == 2:
         rly  = np.zeros((5,), dtype='f8')
         grly = np.zeros((5, 3), dtype='f8')
-        # m = -2: +C4 * 6 x y
-        C4 = _C_lm(2, -2)
-        rly[0]     =  C4 * 6.0 * x * y
-        grly[0, 0] =  C4 * 6.0 * y
-        grly[0, 1] =  C4 * 6.0 * x
-        # m = -1: -C5 * 3 y z
-        C5 = _C_lm(2, -1)
-        rly[1]     = -C5 * 3.0 * y * z
-        grly[1, 1] = -C5 * 3.0 * z
-        grly[1, 2] = -C5 * 3.0 * y
-        # m = 0: +C6 * 0.5*(2 z^2 - x^2 - y^2)
-        C6 = _C_lm(2, 0)
-        rly[2]     =  C6 * 0.5 * (2.0*z*z - x*x - y*y)
-        grly[2, 0] = -C6 * x
-        grly[2, 1] = -C6 * y
-        grly[2, 2] =  C6 * 2.0 * z
-        # m = +1: -C7 * 3 x z
-        C7 = _C_lm(2, 1)
-        rly[3]     = -C7 * 3.0 * x * z
-        grly[3, 0] = -C7 * 3.0 * z
-        grly[3, 2] = -C7 * 3.0 * x
-        # m = +2: +C8 * 3 (x^2 - y^2)
-        C8 = _C_lm(2, 2)
-        rly[4]     =  C8 * 3.0 * (x*x - y*y)
-        grly[4, 0] =  C8 * 6.0 * x
-        grly[4, 1] = -C8 * 6.0 * y
+        C4, C5, C6, C7, C8 = C
+        rly[0] =  C4 * 6.0 * x * y;  grly[0,0] = C4 * 6.0 * y;  grly[0,1] = C4 * 6.0 * x
+        rly[1] = -C5 * 3.0 * y * z;  grly[1,1] = -C5 * 3.0 * z; grly[1,2] = -C5 * 3.0 * y
+        rly[2] =  C6 * 0.5 * (2.0*z*z - x*x - y*y)
+        grly[2,0] = -C6 * x; grly[2,1] = -C6 * y; grly[2,2] = C6 * 2.0 * z
+        rly[3] = -C7 * 3.0 * x * z;  grly[3,0] = -C7 * 3.0 * z; grly[3,2] = -C7 * 3.0 * x
+        rly[4] =  C8 * 3.0 * (x*x - y*y); grly[4,0] = C8 * 6.0 * x; grly[4,1] = -C8 * 6.0 * y
         return rly, grly
     
-    # general recursive case: l >= 3 
-    xhat, yhat, zhat = x/r, y/r, z/r
-    xyhat = np.hypot(xhat, yhat)
+    # general recursive case: l >= 3
+    invr = 1.0 / r 
+    xhat, yhat, zhat = x*invr, y*invr, z*invr
+    xyhat = hypot(xhat, yhat)
     if xyhat < tiny:
         xhat = tiny
-        xyhat = np.hypot(xhat, yhat)
-    cosphi, sinphi = xhat / xyhat, yhat / xyhat
+        xyhat = hypot(xhat, yhat)
+    inv_xy = 1.0 / xyhat
+    cosphi, sinphi = xhat*inv_xy, yhat*inv_xy
     # recursively calculate P(l,m) and its angular derivatives ZP(l,m)
-    P  = np.zeros((l+2, l+2), dtype='f8')
-    ZP = np.zeros((l+1, l+1), dtype='f8')
+    P, ZP = _get_P_ZP_cache(l)
     for M in range(l, -1, -1):
         P[M, M] = 1.0
         fac = 1.0
@@ -166,28 +164,28 @@ def rly_grly_single(l, r, x, y, z, tiny=1e-14):
         Plm, ZPlm = P[l, M], ZP[l, M]
         # m = -M (sin component)
         if M > 0:
-            Cmm = _C_lm(l, -M)
+            Cmm = C[l -M]
             YY  = Cmm * Plm * sinm
             rly[l - M] = RL * YY
-            GY1 = -ZPlm * xhat * zhat * sinm - Plm * M * cosm * sinphi / xyhat
-            GY2 = -ZPlm * yhat * zhat * sinm + Plm * M * cosm * cosphi / xyhat
+            GY1 = -ZPlm * xhat * zhat * sinm - Plm * M * cosm * sinphi * inv_xy
+            GY2 = -ZPlm * yhat * zhat * sinm + Plm * M * cosm * cosphi * inv_xy
             GY3 =  ZPlm * xyhat * xyhat * sinm
-            grly[l - M, 0] = xhat * l * RLm1 * YY + RL * GY1 * Cmm / r
-            grly[l - M, 1] = yhat * l * RLm1 * YY + RL * GY2 * Cmm / r
-            grly[l - M, 2] = zhat * l * RLm1 * YY + RL * GY3 * Cmm / r
+            grly[l - M, 0] = xhat * l * RLm1 * YY + RL * GY1 * Cmm * invr
+            grly[l - M, 1] = yhat * l * RLm1 * YY + RL * GY2 * Cmm * invr
+            grly[l - M, 2] = zhat * l * RLm1 * YY + RL * GY3 * Cmm * invr
         # m = +M (cos component; M = 0 is also here)
-        Cpm = _C_lm(l, +M)
+        Cpm = C[l +M]
         YY  = Cpm * Plm * cosm
         rly[l + M] = RL * YY
-        GY1 = -ZPlm * xhat * zhat * cosm + Plm * M * sinm * sinphi / xyhat
-        GY2 = -ZPlm * yhat * zhat * cosm - Plm * M * sinm * cosphi / xyhat
+        GY1 = -ZPlm * xhat * zhat * cosm + Plm * M * sinm * sinphi * inv_xy
+        GY2 = -ZPlm * yhat * zhat * cosm - Plm * M * sinm * cosphi * inv_xy
         GY3 =  ZPlm * xyhat * xyhat * cosm
-        grly[l + M, 0] = xhat * l * RLm1 * YY + RL * GY1 * Cpm / r
-        grly[l + M, 1] = yhat * l * RLm1 * YY + RL * GY2 * Cpm / r
-        grly[l + M, 2] = zhat * l * RLm1 * YY + RL * GY3 * Cpm / r
+        grly[l + M, 0] = xhat * l * RLm1 * YY + RL * GY1 * Cpm * invr
+        grly[l + M, 1] = yhat * l * RLm1 * YY + RL * GY2 * Cpm * invr
+        grly[l + M, 2] = zhat * l * RLm1 * YY + RL * GY3 * Cpm * invr
 
-        cosm, sinm = cosm * cosphi - sinm * sinphi, cosm * sinphi + sinm * cosphi
-    
+        cosm, sinm = cosm*cosphi - sinm*sinphi, cosm*sinphi + sinm*cosphi
+
     return rly, grly
 
 _PHASE_CACHE = {}  # { l : phase[2l+1] }, each element is ±1
@@ -199,12 +197,10 @@ def _phase_map_to_match_Y(l, trials=7, seed=42):
     """
     rng = np.random.default_rng(seed)
     votes = []
-
     for _ in range(trials):
         # generate a random non-axial unit vector
-        u = rng.normal(size=3)
-        u /= np.linalg.norm(u)
-        x, y, z = float(u[0]), float(u[1]), float(u[2])
+        u = rng.normal(size=3); u /= np.linalg.norm(u)
+        x, y, z = map(float, u)
         R = 1.2345
         # r^l Y: from Y()
         rly_Y = np.array([(R**l) * Y(l*l+l+m, x, y, z) for m in range(-l, l+1)], dtype='f8')
@@ -212,13 +208,10 @@ def _phase_map_to_match_Y(l, trials=7, seed=42):
         rly_S, _ = rly_grly_single(l, R, R*x, R*y, R*z)
         eps = 1e-12
         # vote to 0 for components close to 0, others by sign ratio
-        s = np.zeros((2*l+1,), dtype=np.int8)
+        s = np.ones((2*l+1,), dtype=np.int8)
         mask = np.abs(rly_S) > eps
         s[mask] = np.sign(rly_Y[mask] / rly_S[mask]).astype(np.int8)
-        # treat 0 as +1 (conservative); can also keep 0 for majority
-        s[s == 0] = 1
         votes.append(s)
-
     votes = np.stack(votes, axis=0).astype(np.int32)
     phase = np.sign(np.sum(votes, axis=0)).astype(np.int8)
     phase[phase == 0] = 1
@@ -228,21 +221,53 @@ def get_phase(l):
     """
     get the phase the same as Y(), if not cached, compute and cache it
     """
-    if l not in _PHASE_CACHE:
-        _PHASE_CACHE[l] = _phase_map_to_match_Y(l)
-    return _PHASE_CACHE[l]
+    phase = _PHASE_CACHE.get(l)
+    if phase is None:
+        phase = _phase_map_to_match_Y(l)
+        _PHASE_CACHE[l] = phase
+    return phase
 
 def grad_spharm_xyz(l, R, x, y, z):
     # x, y, z must be normalized
     assert x.shape[0] == y.shape[0] == z.shape[0] == R.shape[0]
     assert len(x.shape) == len(y.shape) == len(z.shape) == len(R.shape) == 1
-    spharm = np.zeros((x.shape[0], 2*l+1), dtype='f8')
-    grad_spharm = np.zeros((x.shape[0], 2*l+1, 3), dtype='f8')
+    N = R.shape[0]
+
+    spharm = np.zeros((N, 2*l+1), dtype='f8')
+    grad_spharm = np.zeros((N, 2*l+1, 3), dtype='f8')
+
     # calculate rly and grly following siesta
-    for i in range(x.shape[0]):
-        rly, grly = rly_grly_single(l, R[i], R[i]*x[i], R[i]*y[i], R[i]*z[i], tiny=1e-14)
-        spharm[i, :] = rly
-        grad_spharm[i, :, :] = grly
+    # quick route: l <=2, totally vectorized
+    C = _C_row(l)
+    X = R * x; Y = R * y; Z = R * z
+    if l == 0:
+        spharm[:, 0] = C[0]
+    elif l == 1:
+        C1, C2, C3 = C[0], C[1], C[2]
+        spharm[:, 0] = -C1 * Y
+        spharm[:, 1] =  C2 * Z
+        spharm[:, 2] = -C3 * X
+        grad_spharm[:, 0, 1] = -C1
+        grad_spharm[:, 1, 2] =  C2
+        grad_spharm[:, 2, 0] = -C3
+    elif l == 2:
+        C4, C5, C6, C7, C8 = C
+        spharm[:, 0] =  C4 * 6.0 * X * Y
+        spharm[:, 1] = -C5 * 3.0 * Y * Z
+        spharm[:, 2] =  C6 * 0.5 * (2.0*Z*Z - X*X - Y*Y)
+        spharm[:, 3] = -C7 * 3.0 * X * Z
+        spharm[:, 4] =  C8 * 3.0 * (X*X - Y*Y)
+        grad_spharm[:, 0, 0] =  C4 * 6.0 * Y;   grad_spharm[:, 0, 1] =  C4 * 6.0 * X
+        grad_spharm[:, 1, 1] = -C5 * 3.0 * Z;   grad_spharm[:, 1, 2] = -C5 * 3.0 * Y
+        grad_spharm[:, 2, 0] = -C6 * X;         grad_spharm[:, 2, 1] = -C6 * Y;         grad_spharm[:, 2, 2] =  C6 * 2.0 * Z
+        grad_spharm[:, 3, 0] = -C7 * 3.0 * Z;   grad_spharm[:, 3, 2] = -C7 * 3.0 * X
+        grad_spharm[:, 4, 0] =  C8 * 6.0 * X;   grad_spharm[:, 4, 1] = -C8 * 6.0 * Y
+    else:
+        for i in range(N):
+            Ri = R[i]; Xi, Yi, Zi = X[i], Y[i], Z[i]
+            rly, grly = rly_grly_single(l, Ri, Xi, Yi, Zi)
+            spharm[i, :] = rly
+            grad_spharm[i, :, :] = grly
     # keep the phase of spharm and grad_spharm the same as Y()
     phase = get_phase(l)
     spharm *= phase[None, :]

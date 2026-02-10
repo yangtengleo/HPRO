@@ -1,11 +1,12 @@
 import os
 import re
+import sys
 import numpy as np
 from scipy.sparse import coo_matrix
 from .structure import Structure
 from .constants import AOFT_QGRID_DEN
 from .utils import atom_number2name
-from .orbutils import parse_siesta_ion, parse_deeph_orbtyps, parse_gpaw_basis, read_upf, grid_R2G, GridFunc, LinearRGD
+from .orbutils import parse_siesta_ion, parse_deeph_orbtyps, parse_gpaw_basis, read_upf, read_siesta_ion, read_siesta_projectors, read_siesta_ao, grid_R2G, GridFunc, LinearRGD
 
 
 def argsort(seq):
@@ -67,11 +68,16 @@ class LCAOData:
             # if spc_nu not in self.orbitals_types:
             if aocode == 'siesta':
                 norb, phirgrids, grad_phirgrids = parse_siesta_ion(f'{basis_path_root}/{spc_na}.ion')
+                #phirgrids, grad_phirgrids = read_siesta_ao("../Vkb")
+                #norb = len(phirgrids)
             elif aocode == 'gpaw':
                 norb, phirgrids = parse_gpaw_basis(findfile(basis_path_root, f'^{spc_na}\..*\.basis$'))
             elif aocode == 'qe-projR':
                 funch, phirgrids = read_upf(findfile(basis_path_root, f'^{spc_na}\.(upf|UPF)$'))
+                #funch, phirgrids = read_siesta_projectors("../Vkb")
+                #funch, phirgrids = read_siesta_ion("../Vkb")
                 norb = len(phirgrids)
+                grad_phirgrids = [None for _ in range(norb)]
             elif aocode == 'deeph':
                 break # handle it later
             else:

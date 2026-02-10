@@ -122,6 +122,8 @@ def get_mat0(ao_data, funch=None):
     translations = ao_data.translations
     atom_pairs = ao_data.atom_pairs
     trans, atoms, mats = [], [], []
+    mats_grad1, mats_grad2 = [], []
+    assert ao_data.mats_phiVdphi is not None
     
     slice_jatm = slice_same(atom_pairs[:, 0])
     njatm = len(slice_jatm) - 1
@@ -133,15 +135,19 @@ def get_mat0(ao_data, funch=None):
         ix_js += startj; ix_jps += startj
         trans.append(translations[ix_jps] - translations[ix_js])
         atoms.append(np.stack((atom_pairs[ix_js, 1], atom_pairs[ix_jps, 1]), axis=1))
+        h = funch[atomj]
         for ix_j, ix_jp in zip(ix_js, ix_jps):
             mat = ao_data.mats[ix_j]
             matp = ao_data.mats[ix_jp]
-            h = funch[atomj]
+            mat_grad1 = ao_data.mats_phiVdphi[ix_j]
+            mat_grad2 = ao_data.mats_phiVdphi[ix_jp]
             mats.append(mat.T @ h @ matp)
+            mats_grad1.append(np.einsum('ipk,pq,qj->ijk', np.swapaxes(mat_grad1, 0, 1), h, matp, optimize=True))
+            mats_grad2.append(np.einsum('ip,pq,qjk->ijk', np.swapaxes(mat, 0, 1), h, mat_grad2, optimize=True))
     trans = np.concatenate(trans, axis=0)
     atoms = np.concatenate(atoms, axis=0)
 
-    return trans, atoms, mats
+    return trans, atoms, mats, mats_grad1, mats_grad2
 
 
 def load_deeph_HS(folder, filename, energy_unit=True):

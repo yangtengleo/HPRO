@@ -1,5 +1,6 @@
 import numpy as np
 import copy
+import sys
 from scipy.sparse import csr_matrix
 
 from .constants import hpro_rng
@@ -160,11 +161,11 @@ class MatLCAO(PairsInfo):
         lcaodata1 (LCAOData): Information for basis functions on the left of the matrix.
         lcaodata2 (LCAOData, optional): Information for basis functions on the right of the matrix. Defaults to lcaodata1 if not provided.
     '''
-    def __init__(self, structure, translations, atom_pairs, mats, lcaodata1, lcaodata2=None, mats_phiVdphi=None):
+    def __init__(self, structure, translations, atom_pairs, mats, lcaodata1, lcaodata2=None, mats_phiVdphi=None, mats_dphiVphi=None):
         super(MatLCAO, self).__init__(structure, translations, atom_pairs)
         self.mats = mats
         self.mats_phiVdphi = mats_phiVdphi if mats_phiVdphi is not None else None
-        self.mats_dphiVphi = copy.deepcopy(mats_phiVdphi) if mats_phiVdphi is not None else None
+        self.mats_dphiVphi = mats_dphiVphi if mats_dphiVphi is not None else None
         self.lcaodata1 = lcaodata1
         self.lcaodata2 = lcaodata2 if lcaodata2 is not None else lcaodata1
         assert self.lcaodata1.structure == self.lcaodata2.structure == self.structure
@@ -179,11 +180,20 @@ class MatLCAO(PairsInfo):
         return cls(pairs.structure, pairs.translations, pairs.atom_pairs, mats, lcaodata1, lcaodata2=lcaodata2)
     
     @classmethod
-    def from_pairs_phiVdphi(cls, pairs, mats, mats_phiVdphi, lcaodata1, lcaodata2=None):
+    def from_pairs_phiVdphi(cls, pairs, mats, lcaodata1, lcaodata2=None, mats_phiVdphi=None, mats_dphiVphi=None):
         '''
         Create MatLCAO and MatLCAO_phiVdphi objects using pairs.
         '''
-        return cls(pairs.structure, pairs.translations, pairs.atom_pairs, mats, lcaodata1, lcaodata2=lcaodata2, mats_phiVdphi=mats_phiVdphi)
+        return cls(pairs.structure, pairs.translations, pairs.atom_pairs, mats, lcaodata1, lcaodata2=lcaodata2, mats_phiVdphi=mats_phiVdphi, mats_dphiVphi=mats_dphiVphi)
+
+    def exchange_phiVdphi(self):
+        mats_phiVdphi_bk = copy.deepcopy(self.mats_phiVdphi)
+        self.mats_phiVdphi = copy.deepcopy(self.mats_dphiVphi)
+        self.mats_dphiVphi = mats_phiVdphi_bk
+
+    def clear_phiVdphi(self):
+        self.mats_phiVdphi = None
+        self.mats_dphiVphi = None
     
     def slice(self, val, new_indices=None):
         '''
@@ -191,6 +201,9 @@ class MatLCAO(PairsInfo):
         '''
         super(MatLCAO, self).slice(val, new_indices=new_indices)
         self.mats = [self.mats[i] for i in np.r_[val]]
+        if self.mats_phiVdphi is not None:
+            self.mats_phiVdphi = [self.mats_phiVdphi[i] for i in np.r_[val]]
+            self.mats_dphiVphi = [self.mats_dphiVphi[i] for i in np.r_[val]]
     
     def get_pairs(self):
         return PairsInfo(self.structure, self.translations, self.atom_pairs)
@@ -220,10 +233,11 @@ class MatLCAO(PairsInfo):
                     self.mats.append(self.mats[ipair].T.copy())
                 else:
                     self.mats.append(self.mats[ipair].T.conj())
-                if self.mats_phiVdphi[ipair] is None:
-                    self.mats_phiVdphi.append(None)
-                else:
-                    self.mats_phiVdphi.append(self.mats_dphiVphi[ipair].copy())
+                if self.mats_phiVdphi is not None:
+                    if self.mats_phiVdphi[ipair] is None:
+                        self.mats_phiVdphi.append(None)
+                    else:
+                        self.mats_phiVdphi.append(np.swapaxes(self.mats_dphiVphi[ipair], 0, 1))
         translations_new = np.concatenate((self.translations, 
                                            translations_inv[not_redundant]), axis=0)
         atom_pairs_new = np.concatenate((self.atom_pairs,
@@ -255,24 +269,25 @@ class MatLCAO(PairsInfo):
     @classmethod
     def setc_phiVdphi(cls, pairs, lcaodata1, lcaodata2=None, filling_value=0, dtype=np.complex128):
         """
-        Generate the MatLCAO object with proper error handling, together with <phi|V|dphi>.
+        Generate the MatLCAO object with proper error handling, together with <phi|V|dphi> and <dphi|V|phi>.
         """
         if lcaodata2 is None:
             lcaodata2 = lcaodata1
         atom_nbrs = pairs.structure.atomic_numbers
-        mats = []
-        mats_phiVdphi = []
+        mats, mats_phiVdphi, mats_dphiVphi = [], [], []
         for ipair in range(pairs.npairs):
             if filling_value is not None:
                 size1 = lcaodata1.orbslices_spc[atom_nbrs[pairs.atom_pairs[ipair, 0]]][-1]
                 size2 = lcaodata2.orbslices_spc[atom_nbrs[pairs.atom_pairs[ipair, 1]]][-1]
                 mats.append(np.full((size1, size2), filling_value, dtype=dtype))
                 mats_phiVdphi.append(np.full((size1, size2, 3), filling_value, dtype=dtype))
+                mats_dphiVphi.append(np.full((size1, size2, 3), filling_value, dtype=dtype))
             else:
                 mats.append(None)
                 mats_phiVdphi.append(None)
-        return cls.from_pairs_phiVdphi(pairs, mats, mats_phiVdphi, lcaodata1, lcaodata2=lcaodata2)
-    
+                mats_dphiVphi.append(None)
+        return cls.from_pairs_phiVdphi(pairs, mats, lcaodata1, lcaodata2=lcaodata2, mats_phiVdphi=mats_phiVdphi, mats_dphiVphi=mats_dphiVphi)
+
     def delete_mats(self):
         self.mats = [None for _ in range(self.npairs)]
     

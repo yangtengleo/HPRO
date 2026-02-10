@@ -1,13 +1,16 @@
 import time
 import numpy as np
+import sys
+import h5py
+from .mathutils import r_to_xyz
 
 from .structure import Structure, load_structure
 from .lcaodata import LCAOData
-from .hrdata import read_hrr, read_vloc, constructH
+from .hrdata import read_hrr, read_vloc, read_vloc_siesta, constructH
 from .deephio import save_structure_deeph, save_mat_deeph, save_phiVdphi_deeph, get_mat0
 from .utils import mpi_watch, simple_timer, is_master, comm, slice_same
 from .twocenter import calc_overlap
-from .orbutils import OrbPair
+from .orbutils import OrbPair, read_siesta_projectors_k, read_siesta_ao_k
 from .matlcao import pwc, MatLCAO, pairs_to_indices, indices_to_pairs
 from .gridintg import GridPoints
 
@@ -139,6 +142,7 @@ class PW2AOkernel:
                 if (hrdata_interface == 'qe-bgw') or (hrdata_interface == 'qe-deephr'):
                     assert vscdir is not None and upfdir is not None
                     vlocr = read_vloc(vscdir, hrdata_interface.split('-')[1]) # bgw or deephr
+                    #vlocr = read_vloc_siesta("../Vloc/P.VT")
                     funch, funcg, projR = read_hrr(structure, upfdir, interface='qe')
                 else:
                     raise NotImplementedError(f'Unknown hrdata_interface {hrdata_interface}')
@@ -197,6 +201,35 @@ class PW2AOkernel:
         basis = self.lcaodata
         basis.calc_phiQ(ecut * 1.1)
         projR.calc_phiQ(ecut * 1.1)
+        
+        '''
+        proj_qlist, proj_qgrid = read_siesta_projectors_k("../Vkb")
+        proj_qlist_spc = {}
+        for spc in projR.structure.atomic_species:
+            proj_qlist_spc[spc] = proj_qlist
+        projR.phiQlist_spc = proj_qlist_spc
+        projR.phiQEcut = 0.5 * (proj_qgrid.rfunc[-1]**2)
+        ecut = projR.phiQEcut
+
+        ao_qlist, ao_qgrid = read_siesta_ao_k("../Vkb")
+        assert np.allclose(proj_qgrid.rfunc, ao_qgrid.rfunc, rtol=1e-12, atol=1e-12)
+        ao_qlist_spc = {}
+        for spc in basis.structure.atomic_species:
+            ao_qlist_spc[spc] = ao_qlist
+        basis.phiQlist_spc = ao_qlist_spc
+        basis.phiQEcut = 0.5 * (ao_qgrid.rfunc[-1]**2)
+
+        print(f"proj Ecut: {projR.phiQEcut}, ao Ecut: {basis.phiQEcut}\n")
+        with open("projr.txt", "w") as f:
+            for i in range(len(projR.phirgrids_spc[15][0].rgd.rfunc)):
+                f.write(f"{projR.phirgrids_spc[15][0].rgd.rfunc[i]:.4e}  {projR.phirgrids_spc[15][0].func[i]:.4e}\n")
+        with open("projk.txt", "w") as f:
+            for i in range(len(projR.phiQlist_spc[15][0].rgd.rfunc)):
+                f.write(f"{projR.phiQlist_spc[15][0].rgd.rfunc[i]:.4e}  {projR.phiQlist_spc[15][0].func[i]:.4e}\n")
+        with open("aor.txt", "w") as f:
+            for i in range(len(basis.phirgrids_spc[15][0].rgd.rfunc)):
+                f.write(f"{basis.phirgrids_spc[15][0].rgd.rfunc[i]:.4e}  {basis.phirgrids_spc[15][0].func[i]:.4e}\n")
+        '''
 
         # Get orbital pairs
         # orbpairs1 saves pairs of AO basis and AO basis
@@ -223,6 +256,7 @@ class PW2AOkernel:
                         r1 = projR.phirgrids_spc[spc1][iorb].rcut
                         thispair = OrbPair(projR.phiQlist_spc[spc1][iorb],
                                             basis.phiQlist_spc[spc2][jorb], r1 + r2, 1)
+                        thispair.grad_setup()
                         orbpairs_thisij2.append(thispair)
                 orbpairs1[(spc1, spc2)] = orbpairs_thisij1
                 orbpairs2[(spc1, spc2)] = orbpairs_thisij2
@@ -236,7 +270,7 @@ class PW2AOkernel:
             olp_proj_ao = calc_overlap(projR, orbpairs2, basis, Ecut=ecut)
         
         # mats0 stores the non-local potential of each AO basis, with multiple repeated atom pairs
-        trans, atoms, mats0 = get_mat0(olp_proj_ao, funch)
+        trans, atoms, mats0, mats0_grad1, mats0_grad2 = get_mat0(olp_proj_ao, funch)
 
         assert funcg is None
         overlaps = olp_basis
@@ -284,27 +318,61 @@ class PW2AOkernel:
 
         # Calculate kinetic energy
         Hkin = calc_overlap(basis, orbpairs3, Ecut=ecut)
+        '''
+        phi_dphi_path = "./phi_dphi.h5" 
+        with h5py.File(phi_dphi_path, 'r') as f:
+            dr_label = f["orbitals"]["[1,10]"]["dr"][()].reshape(-1, 3)
+            phi_label = f["orbitals"]["[1,10]"]["phi"][()]
+            dphi_label = f["orbitals"]["[1,10]"]["dphi"][()].reshape(-1, 3)
+        assert dr_label.shape[0] == phi_label.shape[0] == dphi_label.shape[0]
+        phirgrid = basis.phirgrids_spc[15][5]
+        grad_phirgrid = basis.grad_phirgrids_spc[15][5]
+        Rnorm, x, y, z = r_to_xyz(dr_label)
+        phi = phirgrid.generate3D_norm(Rnorm, x, y, z)[:, 0]
+        dphi = grad_phirgrid.generate3D_grad_norm(Rnorm, x, y, z)[:, 0, :]
+        print("phi dphix dphiy dphiz")
+        for i in range(dr_label.shape[0]):
+            print(f"{phi[i]:>12f} {dphi[i, 0]:>12f} {dphi[i, 1]:>12f} {dphi[i, 2]:>12f}")
+        sys.exit(0)
+        '''
 
         # Calculate <phi|V|phi> by integral of real-space grids
         # Calculate <phi|V|dphi> as well
+        
         Hmain = MatLCAO.setc_phiVdphi(olp_basis.get_pairs_ij(), basis, filling_value=0., dtype='f8')
         Hmain.shuffle()
         constructH(self, vlocr, basis, FFTgrid, rprimFFT, dvol, grids_site_orb, Hmain)
         Hmain.duplicate()
+        if is_master():
+            print('Writing phiVdphi matrices to disk')
+            save_phiVdphi_deeph(savedir, Hmain, filename='phiVdphi.h5', energy_unit=True)
+        
 
-        # Collect matrices into one object
-        # mats2 sums contribution from the same atom pairs together
-        mats2 = []
+        # Sum <phi|Vkb|phi> of the same atom pair but from different projectors together
+        # Calculate <phi|Vkb|dphi> as well
+        mats2, mats2_grad1, mats2_grad2 = [], [], []
         for ipair in range(npairs2):
             slice_thispair = slice(slice2[ipair], slice2[ipair+1])
             mats2.append(np.sum([mats0[i] for i in argsort[slice_thispair]], axis=0))
+            mats2_grad1.append(np.sum([mats0_grad1[i] for i in argsort[slice_thispair]], axis=0))
+            mats2_grad2.append(np.sum([mats0_grad2[i] for i in argsort[slice_thispair]], axis=0))
         xs3 = np.unique(xs2)
         trans3, atms3 = indices_to_pairs(olp_proj_ao.structure.natom, xs3)
-        Hcorr = MatLCAO(olp_proj_ao.structure, trans3, atms3, mats2, olp_proj_ao.lcaodata2)
+        Hcorr = MatLCAO(olp_proj_ao.structure, trans3, atms3, mats2, olp_proj_ao.lcaodata2, mats_phiVdphi=mats2_grad2, mats_dphiVphi=mats2_grad1)
+        Hcorr.exchange_phiVdphi()
         Hcorr.duplicate()
+        if is_master():
+            print('Writing phiVkbdphi matrices to disk')
+            save_phiVdphi_deeph(savedir, Hcorr, filename='phiVkbdphi.h5', energy_unit=True)
         
         # Sum up all the terms
         # addition and subtraction are overloaded in MatLCAO._add_sub() 
+        Hmain.clear_phiVdphi()
+        Hcorr.clear_phiVdphi()
+        if is_master():
+            print('Writing Hnl matrices to disk')
+            save_mat_deeph(savedir, Hkin, filename='kinetics.h5', energy_unit=True)
+            save_mat_deeph(savedir, Hcorr, filename='Hkb.h5', energy_unit=True)
         hamiltonians = Hkin + Hmain + Hcorr
 
         if cutoffs is not None:
@@ -316,8 +384,6 @@ class PW2AOkernel:
         if is_master():
             print('Writing Hamiltonian matrices to disk')
             save_mat_deeph(savedir, hamiltonians, filename='hamiltonians.h5', energy_unit=True)
-            print('Writing phiVdphi matrices to disk')
-            save_phiVdphi_deeph(savedir, Hmain, filename='phiVdphi.h5', energy_unit=True)
 
         if comm is not None:
             comm.Barrier()
