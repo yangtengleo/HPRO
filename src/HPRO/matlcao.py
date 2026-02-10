@@ -193,12 +193,14 @@ class MatLCAO(PairsInfo):
     def duplicate(self):
         '''
         Duplicate this object so that it becomes a full matrix.
+        Due to Hermitian symmetry, do conjugate transpose of (i, j, T) to directly get (j, i, -T).
         '''
         # todo: check lcaodata1==lcaodata2
         translations_inv = -self.translations
         atom_pairs_inv = self.atom_pairs[:, np.array([1, 0])]
         indices = self.get_indices()
         indices_inv = pairs_to_indices(self.structure, translations_inv, atom_pairs_inv)
+        # find which pairs (-T, j, i) are not in the original list, they need to be supplemented
         not_redundant = ~np.isin(indices_inv, indices)
         for ipair in range(self.npairs):
             if not_redundant[ipair]:
