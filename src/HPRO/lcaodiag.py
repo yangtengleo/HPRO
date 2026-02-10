@@ -1,5 +1,5 @@
 import numpy as np
-import os, sys
+import os, sys, copy
 import time, datetime
 
 from .deephio import load_deeph_HS
@@ -15,7 +15,8 @@ try:
     from slepc4py import SLEPc
 except ModuleNotFoundError:
     use_slepc4py = False
-    from scipy.sparse.linalg import eigsh
+    import scipy.sparse as sparse
+    import scipy.linalg as linalg
 
 '''
 This module has several functions to diagonalize atomic orbital Hamiltonians.
@@ -233,10 +234,29 @@ class LCAODiagKernel:
             # use Arpack to diagonalize the Hamiltonian matrix
             else:
                 assert is_master(comm_pool)
+                ill_threshold = 5e-4
+                Sk_dense = Sk.toarray() if sparse.issparse(Sk) else copy.deepcopy(Sk)
+                Hk_dense = Hk.toarray() if sparse.issparse(Hk) else copy.deepcopy(Hk)
+                eigval_S, eigvec_S = linalg.eig(Sk_dense)
+                index_keep = np.where(np.abs(eigval_S) > ill_threshold)[0]
+                U = eigvec_S[:, index_keep]
+                num_ill_states = len(eigval_S) - len(index_keep)
+                num_padding = nbnd - len(index_keep)
+                if num_ill_states > 0:
+                    print(f"Projecting out {num_ill_states} ill-conditioned states at k = {kpt}")
+                    Hk_dense = U.conj().T @ Hk_dense @ U
+                    Sk_dense = U.conj().T @ Sk_dense @ U
+                    Hk = sparse.csr_matrix(Hk_dense, dtype='c16')
+                    Sk = sparse.csr_matrix(Sk_dense, dtype='c16')
+                    nbnd = len(index_keep)
                 if efermi is None:
-                    eigs_k, vecs_k = eigsh(Hk, k=nbnd, M=Sk, which='SR', tol=tole, maxiter=max_it)
+                    eigs_k, vecs_k = sparse.linalg.eigsh(Hk, k=nbnd, M=Sk, which='SR', tol=tole, maxiter=max_it)
                 else:
-                    eigs_k, vecs_k = eigsh(Hk, k=nbnd, M=Sk, sigma=efermi, tol=tole, maxiter=max_it)
+                    eigs_k, vecs_k = sparse.linalg.eigsh(Hk, k=nbnd, M=Sk, sigma=efermi, tol=tole, maxiter=max_it)
+                if num_ill_states > 0:
+                    vecs_k = U @ vecs_k
+                    eigs_k = np.concatenate([eigs_k, np.full(num_padding, 1e4)])
+                    vecs_k = np.pad(vecs_k, ((0, 0), (0, num_padding)), constant_values=0)
                 vecs_k = vecs_k.T
 
             if sort:
