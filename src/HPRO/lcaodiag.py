@@ -185,9 +185,10 @@ class LCAODiagKernel:
             else:
                 print('Using scipy diagonalization with ARPACK')
 
-        eigs = np.empty((nkloc, nbnd), dtype='f8')
+        nbnd_total = nbnd
+        eigs = np.empty((nkloc, nbnd_total), dtype='f8')
         if is_master(comm=comm_pool):
-            wfnao = np.empty((nkloc, nbnd, self.nao), dtype='c16')
+            wfnao = np.empty((nkloc, nbnd_total, self.nao), dtype='c16')
         else:
             wfnao = None
 
@@ -226,7 +227,7 @@ class LCAODiagKernel:
                         sigma = eigmax
                 else:
                     sigma = efermi
-                eigs_k, vecs_k = diag_slepc(Hpetsc, Spetsc, nbnd, 'TR', sigma=sigma, comm=comm_pool, tole=tole, max_it=max_it)
+                eigs_k, vecs_k = diag_slepc(Hpetsc, Spetsc, nbnd_total, 'TR', sigma=sigma, comm=comm_pool, tole=tole, max_it=max_it)
 
                 Hpetsc.destroy()
                 Spetsc.destroy()
@@ -241,18 +242,18 @@ class LCAODiagKernel:
                 index_keep = np.where(np.abs(eigval_S) > ill_threshold)[0]
                 U = eigvec_S[:, index_keep]
                 num_ill_states = len(eigval_S) - len(index_keep)
-                num_padding = nbnd - len(index_keep)
+                nbnd_eff = min(nbnd_total, len(index_keep))
+                num_padding = nbnd_total - nbnd_eff
                 if num_ill_states > 0:
                     print(f"Projecting out {num_ill_states} ill-conditioned states at k = {kpt}")
                     Hk_dense = U.conj().T @ Hk_dense @ U
                     Sk_dense = U.conj().T @ Sk_dense @ U
                     Hk = sparse.csr_matrix(Hk_dense, dtype='c16')
                     Sk = sparse.csr_matrix(Sk_dense, dtype='c16')
-                    nbnd = len(index_keep)
                 if efermi is None:
-                    eigs_k, vecs_k = sparse.linalg.eigsh(Hk, k=nbnd, M=Sk, which='SR', tol=tole, maxiter=max_it)
+                    eigs_k, vecs_k = sparse.linalg.eigsh(Hk, k=nbnd_eff, M=Sk, which='SR', tol=tole, maxiter=max_it)
                 else:
-                    eigs_k, vecs_k = sparse.linalg.eigsh(Hk, k=nbnd, M=Sk, sigma=efermi, tol=tole, maxiter=max_it)
+                    eigs_k, vecs_k = sparse.linalg.eigsh(Hk, k=nbnd_eff, M=Sk, sigma=efermi, tol=tole, maxiter=max_it)
                 if num_ill_states > 0:
                     vecs_k = U @ vecs_k
                     eigs_k = np.concatenate([eigs_k, np.full(num_padding, 1e4)])
@@ -268,34 +269,30 @@ class LCAODiagKernel:
             eigs[ikpt, :] = eigs_k
             if is_master(comm=comm_pool):
                 wfnao[ikpt, :, :] = vecs_k
-            
-        # Collect eigs and wfnao from groups
+
+        # Collect eigs and wfnao from all ranks to master rank
         if comm is not None:
-            comm_m = comm.Split(color=0 if is_master(comm=comm_pool) else 1, key=comm.rank)
+            eigs_buf = np.zeros((self.nk, nbnd_total), dtype='f8')
+            wfnao_buf = np.zeros((self.nk, nbnd_total, self.nao), dtype='c16')
             if is_master(comm=comm_pool):
-                assert comm_m.rank == self.igrp
-                if is_master(comm=comm_m):
-                    eigs_recv = np.empty((self.nk, nbnd), dtype='f8')
-                    wfnao_recv = np.empty((self.nk, nbnd, self.nao), dtype='c16')
-                else:
-                    eigs_recv = wfnao_recv = None
-                # Gatherv is a MPI function to gather data with different length from each pool
-                comm_m.Gatherv([eigs, nkloc * nbnd, MPI.REAL8],
-                               [eigs_recv, count_k*nbnd, displ_k[:-1]*nbnd, MPI.REAL8], root=0)
-                comm_m.Gatherv([wfnao, nkloc*nbnd*self.nao, MPI.COMPLEX16],
-                               [wfnao_recv, count_k*nbnd*self.nao, displ_k[:-1]*nbnd*self.nao, MPI.COMPLEX16], root=0)
-                eigs = eigs_recv
-                wfnao = wfnao_recv
+                eigs_buf[displ_k[self.igrp] : displ_k[self.igrp] + nkloc] = eigs
+                wfnao_buf[displ_k[self.igrp] : displ_k[self.igrp] + nkloc] = wfnao
+                eigs_root = np.empty_like(eigs_buf) if is_master(comm=comm) else None
+                wfnao_root = np.empty_like(wfnao_buf) if is_master(comm=comm) else None
+                comm.Reduce(eigs_buf, eigs_root, op=MPI.SUM, root=0)
+                comm.Reduce(wfnao_buf, wfnao_root, op=MPI.SUM, root=0)
+                eigs = eigs_root
+                wfnao = wfnao_root
     
         if is_master(comm=comm):
             for ikpt in range(self.nk):
                 kpt = self.kpts[ikpt]
-                print(f'k ={kpt[0]:9.5f}{kpt[1]:9.5f}{kpt[2]:9.5f}   nbnd ={nbnd:4d}', end='')
+                print(f'k ={kpt[0]:9.5f}{kpt[1]:9.5f}{kpt[2]:9.5f}   nbnd ={nbnd_total:4d}', end='')
                 if ikpt in self.hskpos:
                     print('  ', self.hsksymbol[self.hskpos.index(ikpt)])
                 else:
                     print()
-                for ibnd in range(nbnd):
+                for ibnd in range(nbnd_total):
                     print(f'{eigs[ikpt, ibnd]*hartree2ev:9.4f}', end='')
                     if ibnd % 8 == 7:
                         print()
