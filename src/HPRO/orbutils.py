@@ -7,7 +7,7 @@ import scipy.special as sp
 
 from .structure import Structure
 from .from_gpaw.gaunt import gaunt
-from .mathutils import r_to_xyz, spbessel_transfrorm, spharm_xyz
+from .mathutils import r_to_xyz, spbessel_transfrorm, spharm_xyz, grad_spharm_xyz
 
 # == radial grids ==
 
@@ -60,6 +60,16 @@ class GridFunc:
         assert np.max(r) <= self.rgd.rend
         assert np.min(r) >= self.rgd.rstart
         return self.rgd.generate(self.generator, r)
+    
+    def generate_grad(self, r):
+        '''
+        Same as generate, but returns both function values and their gradients.
+        '''
+        if self.generator is None:
+            self.calc_generator()
+        assert np.max(r) <= self.rgd.rend
+        assert np.min(r) >= self.rgd.rstart
+        return self.rgd.generate(self.generator, r), self.rgd.generate_grad(self.generator, r)
 
     def generatexyz(self, Rnorm, x, y, z):
         Ylm = spharm_xyz(self.l, x, y, z)
@@ -67,9 +77,10 @@ class GridFunc:
         return Rlm[:, None] * Ylm[:, :]
     
     def generatexyz_grad(self, Rnorm, x, y, z):
-        Ylm = spharm_xyz(self.l, x, y, z)
-        Rlm = self.generate(Rnorm)
-        return Rlm[:, None] * Ylm[:, :]
+        Rl_Ylm, grad_Rl_Ylm = grad_spharm_xyz(self.l, Rnorm, x, y, z)
+        Rlm, grad_Rlm = self.generate_grad(Rnorm)
+        Rhat = np.concatenate([x[:, None], y[:, None], z[:, None]], axis=1)
+        return grad_Rlm[:, None, None] * Rl_Ylm[:, :, None] * Rhat[:, None, :] + Rlm[:, None, None] * grad_Rl_Ylm[:, :, :]
 
     def generate3D(self, Rvec):
         '''
@@ -132,6 +143,9 @@ class RadialGrid:
     
     def generate(self, generator, r):
         return generator(r)
+
+    def generate_grad(self, generator, r):
+        return generator(r, 1)
     
     def r2i_ceil(self, r):
         return np.searchsorted(self.rfunc, r)
