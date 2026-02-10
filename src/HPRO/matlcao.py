@@ -255,6 +255,7 @@ class MatLCAO(PairsInfo):
         other.sort()
         indices1 = self.get_indices()
         indices2 = other.get_indices()
+        # Concatenate, de-duplicate and sort all atom pairs of two matrices
         indices_all = np.union1d(indices1, indices2)
         translations_all, atom_pairs_all = indices_to_pairs(self.structure.natom, indices_all)
         npairs_all = translations_all.shape[0]
