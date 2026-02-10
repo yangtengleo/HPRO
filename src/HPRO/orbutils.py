@@ -102,6 +102,16 @@ class GridFunc:
         Rnorm, x, y, z = r_to_xyz(Rvec)
         R_lm = self.generatexyz(Rnorm, x, y, z)
         return R_lm.reshape(rshape0 + (2*self.l+1,))
+    
+    def generate3D_grad(self, Rvec):
+        '''
+        Same as `generate3D_noselect`, but returns the gradient of the function.
+        '''
+        rshape0 = Rvec.shape[:-1]
+        Rvec = Rvec.reshape(-1, 3)
+        Rnorm, x, y, z = r_to_xyz(Rvec)
+        grad_R_lm = self.generatexyz_grad(Rnorm, x, y, z)
+        return grad_R_lm.reshape(rshape0 + (2*self.l+1, 3, ))
 
 class RadialGrid:
     '''
