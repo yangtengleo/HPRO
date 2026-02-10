@@ -194,9 +194,13 @@ class LCAODiagKernel:
         for ikpt in tqdm_mpi_tofile(range(count_k[self.igrp])):
             kpt = self.kpts[ikpt + displ_k[self.igrp]]
 
+            # all of MPI tasks is divided into several comm pools, each comm pool calculates K points seperately
+            # only rank 0 of each comm pool constructs Hk and Sk, and then broadcast to all ranks in the same comm pool 
             if is_master(comm=comm_pool):
                 Hk = self.matH.r2k(kpt)
                 Sk = self.matS.r2k(kpt)
+                # transform numpy format to PETSc format
+                # PETSc is a high-performance library for parallel computing, SLEPc is a library for solving eigenvalue problems using PETSc format
                 if use_slepc4py:
                     Hpetsc = mat_scipy2petsc(Hk, comm=comm_pool)
                     Spetsc = mat_scipy2petsc(Sk, comm=comm_pool)
@@ -205,6 +209,10 @@ class LCAODiagKernel:
                     Hpetsc = mat_scipy2petsc(None, comm=comm_pool)
                     Spetsc = mat_scipy2petsc(None, comm=comm_pool)
             
+            # use SLEPc to diagonalize the Hamiltonian matrix
+            # firstly, find the largest eigenvalue lambda_max
+            # secondly, find the smallest eigenvalue lambda_min of new matrix H - lambda_max * S
+            # finally, get the symmetric point sigma = lambda_min + lambda_max, as the center of shift-and-invert, to improve numerical stability
             if use_slepc4py:
                 if efermi is None:
                     eigmax, _ = diag_slepc(Hpetsc, Spetsc, 1, 'LM', tole=0.1, comm=comm_pool)
@@ -222,6 +230,7 @@ class LCAODiagKernel:
                 Hpetsc.destroy()
                 Spetsc.destroy()
 
+            # use Arpack to diagonalize the Hamiltonian matrix
             else:
                 assert is_master(comm_pool)
                 if efermi is None:
@@ -235,6 +244,7 @@ class LCAODiagKernel:
                 eigs_k = eigs_k[argsort]
                 if is_master(comm_pool): vecs_k = vecs_k[argsort, :]
             
+            # eigs shape: (nkloc, nbnd), wfnao shape: (nkloc, nbnd, nao)
             eigs[ikpt, :] = eigs_k
             if is_master(comm=comm_pool):
                 wfnao[ikpt, :, :] = vecs_k
@@ -249,6 +259,7 @@ class LCAODiagKernel:
                     wfnao_recv = np.empty((self.nk, nbnd, self.nao), dtype='c16')
                 else:
                     eigs_recv = wfnao_recv = None
+                # Gatherv is a MPI function to gather data with different length from each pool
                 comm_m.Gatherv([eigs, nkloc * nbnd, MPI.REAL8],
                                [eigs_recv, count_k*nbnd, displ_k[:-1]*nbnd, MPI.REAL8], root=0)
                 comm_m.Gatherv([wfnao, nkloc*nbnd*self.nao, MPI.COMPLEX16],
@@ -297,6 +308,7 @@ class LCAODiagKernel:
                 f.write('  ' + self.hsksymbol[self.hskpos.index(ikpt)] + '\n')
             else:
                 f.write('\n')
+            # each row starts with "1" to represent spin, now it's hard-coded
             for ibnd in range(nbnd):
                 f.write(f'{1:8d}{ibnd+1:8d}{self.eigs[ikpt, ibnd]*hartree2ev:15.9f}\n')
         f.close()
