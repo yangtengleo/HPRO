@@ -183,7 +183,7 @@ class LCAODiagKernel:
             if use_slepc4py:
                 print('Using SLEPc diagonalization with MKL Pardiso')
             else:
-                print('Using scipy diagonalization with ARPACK')
+                print('Using scipy generalized Hermitian diagonalization')
 
         nbnd_total = nbnd
         eigs = np.empty((nkloc, nbnd_total), dtype='f8')
@@ -232,14 +232,18 @@ class LCAODiagKernel:
                 Hpetsc.destroy()
                 Spetsc.destroy()
 
-            # use Arpack to diagonalize the Hamiltonian matrix
+            # use scipy / LAPACK to diagonalize the generalized Hamiltonian
+            # Original scipy.sparse.linalg.eigsh() is not a reliable choice
+            # since for complex input, it internally falls back to non-Hermitian solver eigs()
+            # which fail to preserve the multiplicity of degenerate eigenvalues
+            # This may lead to spurious band jumping in the diag output
             else:
                 assert is_master(comm_pool)
                 ill_threshold = 5e-4
                 Sk_dense = Sk.toarray() if sparse.issparse(Sk) else copy.deepcopy(Sk)
                 Hk_dense = Hk.toarray() if sparse.issparse(Hk) else copy.deepcopy(Hk)
-                eigval_S, eigvec_S = linalg.eig(Sk_dense)
-                index_keep = np.where(np.abs(eigval_S) > ill_threshold)[0]
+                eigval_S, eigvec_S = linalg.eigh(Sk_dense, check_finite=False)
+                index_keep = np.where(eigval_S > ill_threshold)[0]
                 U = eigvec_S[:, index_keep]
                 num_ill_states = len(eigval_S) - len(index_keep)
                 nbnd_eff = min(nbnd_total, len(index_keep))
@@ -248,12 +252,16 @@ class LCAODiagKernel:
                     print(f"Projecting out {num_ill_states} ill-conditioned states at k = {kpt}")
                     Hk_dense = U.conj().T @ Hk_dense @ U
                     Sk_dense = U.conj().T @ Sk_dense @ U
-                    Hk = sparse.csr_matrix(Hk_dense, dtype='c16')
-                    Sk = sparse.csr_matrix(Sk_dense, dtype='c16')
                 if efermi is None:
-                    eigs_k, vecs_k = sparse.linalg.eigsh(Hk, k=nbnd_eff, M=Sk, which='SR', tol=tole, maxiter=max_it)
+                    eigs_k, vecs_k = linalg.eigh(Hk_dense, Sk_dense, 
+                                                 subset_by_index=[0, nbnd_eff - 1], 
+                                                 driver='gvx', check_finite=False)
                 else:
-                    eigs_k, vecs_k = sparse.linalg.eigsh(Hk, k=nbnd_eff, M=Sk, sigma=efermi, tol=tole, maxiter=max_it)
+                    eigs_all, vecs_all = linalg.eigh(Hk_dense, Sk_dense, 
+                                                     driver='gvd', check_finite=False)
+                    idx_target = np.argsort(np.abs(eigs_all - efermi))[:nbnd_eff]
+                    eigs_k = eigs_all[idx_target]
+                    vecs_k = vecs_all[:, idx_target]
                 if num_ill_states > 0:
                     vecs_k = U @ vecs_k
                     eigs_k = np.concatenate([eigs_k, np.full(num_padding, 1e4)])
