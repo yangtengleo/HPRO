@@ -7,9 +7,10 @@ from .utils import slice_same
 from .orbutils import LinearRGD, GridFunc
 from .from_gpaw.gaunt import gaunt
 # from .lcaodata import pwc
-from .matlcao import MatLCAO, pwc
+from .matlcao import MatLCAO, pwc, pairs_to_indices
 from .mathutils import r_to_xyz
 from .constants import TWOCENTER_RGRID_DEN
+
 
 class TwoCenterIntgSplines:
     '''
@@ -145,3 +146,111 @@ def calc_overlap(lcaodata1, dictatuple, lcaodata2=None, Ecut=50):
         overlaps.duplicate()
         
     return overlaps
+
+
+def calc_position(lcaodata, dictatuple, overlaps):
+    '''
+    Calculate the real-space AO position matrix by two-center integral
+        r_ij(R) = < 0i | r | Rj >,
+    which can be decomposed as
+        < Ai | r | Bj > = A * < Ai | Bj > + < Ai | (r - A) | Bj >.
+
+    Returns
+    -------
+    MatLCAO
+        Position matrix blocks with the shape (norb_i, norb_j, 3), in Bohr.
+    '''
+
+    stru = lcaodata.structure
+    translations = overlaps.translations.copy()
+    atom_pairs = overlaps.atom_pairs.copy()
+    spc_pairs = stru.atomic_numbers[atom_pairs]
+
+    mats = []
+    for ipair in range(overlaps.npairs):
+        spc1, spc2 = spc_pairs[ipair]
+        norb1 = lcaodata.orbslices_spc[spc1][-1]
+        norb2 = lcaodata.orbslices_spc[spc2][-1]
+        mats.append(np.zeros((norb1, norb2, 3), dtype='f8'))
+
+    pos_mat = MatLCAO(stru, translations, atom_pairs, mats, lcaodata)
+
+    # Process all geometrically equivalent species pairs in batch
+    pair_labels = spc_pairs[:, 0] * 200 + spc_pairs[:, 1]
+    for pair_label in np.unique(pair_labels):
+        indices = np.where(pair_labels == pair_label)[0]
+        spc1, spc2 = spc_pairs[indices[0]]
+
+        pos_i = stru.atomic_positions_cart[atom_pairs[indices, 0]]
+        pos_j = stru.atomic_positions_cart[atom_pairs[indices, 1]]
+        Dvec = translations[indices] @ stru.rprim + pos_j - pos_i
+        Rnorm, x, y, z = r_to_xyz(Dvec)
+
+        norb1 = lcaodata.orbslices_spc[spc1][-1]
+        norb2 = lcaodata.orbslices_spc[spc2][-1]
+        P_thisij = np.zeros((len(indices), norb1, norb2, 3), dtype='f8')
+
+        orbpairs_thisij = dictatuple[(spc1, spc2)]
+        ix_orbpair = 0
+        for jorb in range(lcaodata.norb_spc[spc2]):
+            for iorb in range(lcaodata.norb_spc[spc1]):
+                slice1 = slice(lcaodata.orbslices_spc[spc1][iorb],
+                               lcaodata.orbslices_spc[spc1][iorb + 1])
+                slice2 = slice(lcaodata.orbslices_spc[spc2][jorb],
+                               lcaodata.orbslices_spc[spc2][jorb + 1])
+                orbpair = orbpairs_thisij[ix_orbpair]
+                P_thisij[:, slice1, slice2, :] = orbpair.calc(Rnorm, x, y, z)
+                ix_orbpair += 1
+        assert ix_orbpair == len(orbpairs_thisij)
+
+        # Build the full position matrix P = A * S + D
+        for ii, ipair in enumerate(indices):
+            P_thisij[ii] += (overlaps.mats[ipair][:, :, None] *
+                            pos_i[ii][None, None, :])
+            pos_mat.mats[ipair] = P_thisij[ii]
+
+    return pos_mat
+
+
+def position_diagnostic(position, overlaps):
+    assert position.npairs == overlaps.npairs
+    assert np.array_equal(position.translations, overlaps.translations)
+    assert np.array_equal(position.atom_pairs, overlaps.atom_pairs)
+    stru = position.structure
+
+    max_abs = 0.0
+    max_nonmulliken = 0.0
+    max_covariance_err = 0.0
+    missing_inverse = 0
+
+    indices = position.get_indices()
+    index_to_ipair = {int(ind): ipair for ipair, ind in enumerate(indices)}
+
+    for ipair in range(position.npairs):
+        P = position.mats[ipair]
+        S = overlaps.mats[ipair]
+        max_abs = max(max_abs, float(np.max(np.abs(P))))
+
+        iat, jat = position.atom_pairs[ipair]
+        Rcart = position.translations[ipair] @ stru.rprim
+        A = stru.atomic_positions_cart[iat]
+        B = Rcart + stru.atomic_positions_cart[jat]
+        midpoint = 0.5 * (A + B)
+        mulliken = S[:, :, None] * midpoint[None, None, :]
+        max_nonmulliken = max(max_nonmulliken,
+                              float(np.max(np.abs(P - mulliken))))
+
+        inv_trans = -position.translations[ipair:ipair + 1]
+        inv_atoms = position.atom_pairs[ipair:ipair + 1, ::-1]
+        inv_index = int(pairs_to_indices(stru, inv_trans, inv_atoms)[0])
+        jpair = index_to_ipair.get(inv_index)
+        if jpair is None:
+            missing_inverse += 1
+            continue
+
+        Pinv_dag = np.swapaxes(position.mats[jpair].conj(), 0, 1)
+        residual = P - Pinv_dag - S[:, :, None] * Rcart[None, None, :]
+        max_covariance_err = max(max_covariance_err,
+                                 float(np.max(np.abs(residual))))
+
+    return max_abs, max_nonmulliken, max_covariance_err, missing_inverse

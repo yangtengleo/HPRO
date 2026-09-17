@@ -188,7 +188,8 @@ class RadialGrid:
             if not self.__class__ is other.__class__: return False
             if not np.all(np.abs(self.rfunc-other.rfunc)) < 1e-6: return False
             return True
-    
+
+
 class LinearRGD(RadialGrid):
     def __init__(self, rstart, rend, npoints):
         # includes both ends
@@ -211,6 +212,7 @@ class LinearRGD(RadialGrid):
         assert np.all(np.abs(obj.rfunc - rfunc)) < 1e-6
         return obj
 
+
 class FracPolyRGD(RadialGrid):
     # r=a*i/(n-i)
     def __init__(self, a, n):
@@ -224,6 +226,7 @@ class FracPolyRGD(RadialGrid):
         assert len(func_on_grid) == self.npoints
         # return simpson(func_on_grid * self.dr_dx)
         return simpson(func_on_grid * self.rfunc**n, self.rfunc)
+
 
 class ExpRGD(RadialGrid):
     # r=a*exp(d*i) or r=a*(exp(d*i)-1)
@@ -269,6 +272,7 @@ def grid_overlap(gridfunc1, gridfunc2):
     rgd = gridfunc1.rgd
     return rgd.sips(gridfunc1.func * gridfunc2.func)
 
+
 def grid_G2R(rgrid, gridfuncG, return_real=True):
     '''
     Perform radial Fourier transformation from reciprocal space to real space.
@@ -281,6 +285,7 @@ def grid_G2R(rgrid, gridfuncG, return_real=True):
         funcR[ir] = phi if return_real else phi * phase
     return GridFunc(rgrid, funcR, l=gridfuncG.l)
 
+
 def grid_R2G(Ggrid, gridfuncR, return_real=True):
     '''
     Perform radial Fourier transformation from real space to reciprocal space.
@@ -292,7 +297,7 @@ def grid_R2G(Ggrid, gridfuncR, return_real=True):
         phi, phase = spbessel_transfrorm(gridfuncR.l, Ggrid.rfunc[ir], gridfuncR.rgd, gridfuncR.func, norm='forward')
         funcR[ir] = phi if return_real else phi * phase
     return GridFunc(Ggrid, funcR, l=gridfuncR.l)
-    
+
 # == load orbitals ==
 
 def parse_siesta_ion(filename):
@@ -354,6 +359,7 @@ def parse_gpaw_basis(filename):
     norb = len(phirgrids)
     
     return norb, phirgrids
+
 
 def parse_deeph_orbtyps(deephsave):
     stru = Structure.from_deeph(deephsave)
@@ -440,10 +446,86 @@ class OrbPair:
                           grad_Sl_Ylm[:, :, None, None, :], axis=1)
         return grad_Sl_3D.reshape((Rnorm.shape[0], 2*self.l1+1, 2*self.l2+1, 3))
 
+
+def prepare_position_bra(phirgrid, qgrid):
+    """
+    Precompute reciprocal-space radial grids needed for r * phi.
+    The returned dictionary maps lp = l±1 to the r*R_l(r) radial grid, 
+    reused for all ket radial shells.
+    """
+    l = phirgrid.l
+    rphir = phirgrid.rgd.rfunc * phirgrid.func
+    lprimes = [l + 1]
+    if l > 0:
+        lprimes.insert(0, l - 1)
+
+    channels = {}
+    for lp in lprimes:
+        rphirgrid = GridFunc(phirgrid.rgd, rphir, l=lp, rcut=phirgrid.rcut)
+        channels[lp] = grid_R2G(qgrid, rphirgrid)
+    return channels
+
+
+class PosOrbPair:
+    """
+    For two real AO shells centered at A and B = A + R,
+    evaluate a part of position matrix measured from the first center,
+        D_{ij}(R) = < phi_{Ai} | (r - A) | phi_{Bj} >
+    The full position matrix is therefore
+        < phi_{Ai} | r | phi_{Bj} > = A * S(R) + D_{ij}(R).
+    
+    Based on the two-center integral, the bra of D_{ij}(R) can be specified as 
+        r * R_l(r) * Y_lm(rhat) = |r| * R_l(r) * [rhat * Y_lm(rhat)]
+    and expanded with Gaunt coefficients.
+    """
+    def __init__(self, rgrid1, rgrid2, rcut, bras=None):
+        self.l1 = rgrid1.l
+        self.l2 = rgrid2.l
+        self.gamma = gaunt(max(self.l1, 1))
+        # Wikipedia real spherical harmonic ordering for rhat (l=1) is [y, z, x]
+        self.Lrhat_index = (3, 1, 2)
+        self.channels = []
+        
+        # rhat_alpha = sqrt(4*pi/3) Y_{1, alpha} for normalized real Y_lm
+        # odd parity restricts lprime only to l-1 and l+1
+        prefac = np.sqrt(4.0 * pi / 3.0)
+        lprimes = [self.l1 + 1]
+        if self.l1 > 0:
+            lprimes.insert(0, self.l1 - 1)
+
+        for lp in lprimes:
+            coeff = np.zeros((3, 2*self.l1+1, 2*lp+1), dtype='f8')
+            for alpha, Lrhat in enumerate(self.Lrhat_index):
+                for m1 in range(2 * self.l1 + 1):
+                    L1 = self.l1**2 + m1
+                    for mp in range(2 * lp + 1):
+                        Lp = lp**2 + mp
+                        coeff[alpha, m1, mp] = prefac * self.gamma[Lp, Lrhat, L1]
+            if np.max(np.abs(coeff)) < 1.0e-10:
+                continue
+            # The expensive Fourier transform of r*R_1(r) can be reused
+            # for every ket shell coupled to the same bra radial orbital.
+            pair = OrbPair(bras[lp], rgrid2, rcut, 1)
+            self.channels.append((coeff, pair))
+
+    def calc(self, Rnorm, x, y, z):
+        '''
+        Evaluate a batch of < Ai | r-A | Bj > with the same species pair.  
+        The returned shape is (nR, 2*l1+1, 2*l2+1, 3).
+        '''
+        nR = Rnorm.shape[0]
+        out = np.zeros((nR, 2*self.l1+1, 2*self.l2+1, 3), dtype='f8')
+        for coeff, pair in self.channels:
+            # Sl_pos shape: (nR, 2*lp+1, 2*l2+1)
+            # coeff shape: (3, 2*l1+1, 2*lp+1)
+            Sl_pos = pair.calc(Rnorm, x, y, z)
+            out += np.einsum('aip,npj->nija', coeff, Sl_pos, optimize=True)
+        return out
+
+
 def read_upf(filename):
     """
     Read a QE pseudopotential file in the upf format.
-
     Let nproj be the number of projector functions, and nproj_full be the sum of 2*l+1 of each projector:
 
     Returns:
@@ -494,6 +576,7 @@ def read_upf(filename):
     funch_full = np.block(funch_full)
     
     return funch_full, projR_list
+
 
 def read_siesta_ion(dirpath):
     funch, l_list, projR_list = [], [], []
@@ -641,6 +724,7 @@ def read_siesta_projectors(dirpath, species_index=None, tol=1e-12, normalize=Fal
 
     return funch_full, projR_list
 
+
 def read_siesta_projectors_k(dirpath, species_index=None, tol=1e-12, normalize=False):
     kb_file  = os.path.join(dirpath, "kb_params.txt")
     kproj_file = os.path.join(dirpath, "projectors_k.txt")
@@ -741,6 +825,7 @@ def read_siesta_projectors_k(dirpath, species_index=None, tol=1e-12, normalize=F
     
     return phiQ_list, qgrid
 
+
 def read_siesta_ao_k(dirpath, species_index=None, tol=1e-12, normalize=False):
     ao_param_file  = os.path.join(dirpath, "ao_params.txt")
     ao_k_file = os.path.join(dirpath, "ao_k.txt")
@@ -838,6 +923,7 @@ def read_siesta_ao_k(dirpath, species_index=None, tol=1e-12, normalize=False):
         phiQ_list.append(phiQgrid)
     
     return phiQ_list, qgrid
+
 
 def read_siesta_ao(dirpath, species_index=None, tol=1e-12, normalize=False):
     ao_param_file  = os.path.join(dirpath, "ao_params.txt")

@@ -33,12 +33,14 @@ def save_structure_deeph(structure, savedir):
     with open(f'{savedir}/info.json', 'w') as f:
         json.dump(info, f)
 
+
 Us_openmx2wiki = {
     0: np.eye(1),
     1: np.eye(3)[[1, 2, 0]],
     2: np.eye(5)[[2, 4, 0, 3, 1]],
     3: np.eye(7)[[6, 4, 2, 0, 1, 3, 5]]
 }
+
 
 def get_Us_openmx2wiki(ls_spc):
     '''
@@ -51,8 +53,8 @@ def get_Us_openmx2wiki(ls_spc):
         orbitals_Us_openmx2wiki[spc] = block_diag(*U2deeph)
     return orbitals_Us_openmx2wiki
 
-def save_mat_deeph(savedir, matlcao, filename='hamiltonians.h5', energy_unit=True):
 
+def save_mat_deeph(savedir, matlcao, filename='hamiltonians.h5', energy_unit=True):
     lcaodata = matlcao.lcaodata1
     # todo: check lcaodata1 == lcaodata2
 
@@ -85,8 +87,28 @@ def save_mat_deeph(savedir, matlcao, filename='hamiltonians.h5', energy_unit=Tru
     
     h5file.close()
 
-def save_phiVdphi_deeph(savedir, matlcao, filename='phiVdphi.h5', energy_unit=True):
 
+def save_pos_deeph(savedir, matlcao, filename='positions.h5'):
+    lcaodata = matlcao.lcaodata1
+    os.makedirs(savedir, exist_ok=True)
+    atom_nbrs = lcaodata.structure.atomic_numbers
+    ls_spc = lcaodata.ls_spc
+    orbitals_Us_openmx2wiki = get_Us_openmx2wiki(ls_spc)
+    h5file = h5py.File(f'{savedir}/{filename}', 'w', libver='latest')
+
+    for ipair in range(matlcao.npairs):
+        spc1 = atom_nbrs[matlcao.atom_pairs[ipair, 0]]
+        spc2 = atom_nbrs[matlcao.atom_pairs[ipair, 1]]
+        U1 = orbitals_Us_openmx2wiki[spc1]
+        U2 = orbitals_Us_openmx2wiki[spc2]
+        key = matlcao.get_keystr(ipair)
+        mat = np.einsum('ia,abk,bj->ijk', U1.T, matlcao.mats[ipair], U2, optimize=True)
+        h5file[key] = mat
+
+    h5file.close()
+
+
+def save_phiVdphi_deeph(savedir, matlcao, filename='phiVdphi.h5', energy_unit=True):
     lcaodata = matlcao.lcaodata1
     os.makedirs(savedir, exist_ok=True)
     atom_nbrs = lcaodata.structure.atomic_numbers
@@ -110,6 +132,7 @@ def save_phiVdphi_deeph(savedir, matlcao, filename='phiVdphi.h5', energy_unit=Tr
         h5file[key] = mat
     
     h5file.close()
+
 
 def get_mat0(ao_data, funch=None):
     for ih in range(len(funch)):
@@ -177,6 +200,7 @@ def load_deeph_HS(folder, filename, energy_unit=True):
     atom_pairs = np.array(atom_pairs)
     npairs = len(atom_pairs)
     return MatLCAO(stru, translations, atom_pairs, hoppings, lcaodata)
+
 
 def analyze_hdecay_deeph():
     raise NotImplementedError()

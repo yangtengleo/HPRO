@@ -6,11 +6,11 @@ from .mathutils import r_to_xyz
 
 from .structure import Structure, load_structure
 from .lcaodata import LCAOData
-from .hrdata import read_hrr, read_vloc, read_vloc_siesta, constructH
-from .deephio import save_structure_deeph, save_mat_deeph, save_phiVdphi_deeph, get_mat0
+from .hrdata import read_hrr, read_vloc, constructH
+from .deephio import save_structure_deeph, save_mat_deeph, save_phiVdphi_deeph, save_pos_deeph, get_mat0
 from .utils import mpi_watch, simple_timer, is_master, comm, slice_same
-from .twocenter import calc_overlap
-from .orbutils import OrbPair, read_siesta_projectors_k, read_siesta_ao_k
+from .twocenter import calc_overlap, calc_position
+from .orbutils import OrbPair, PosOrbPair, prepare_position_bra
 from .matlcao import pwc, MatLCAO, pairs_to_indices, indices_to_pairs
 from .gridintg import GridPoints
 
@@ -142,7 +142,6 @@ class PW2AOkernel:
                 if (hrdata_interface == 'qe-bgw') or (hrdata_interface == 'qe-deephr'):
                     assert vscdir is not None and upfdir is not None
                     vlocr = read_vloc(vscdir, hrdata_interface.split('-')[1]) # bgw or deephr
-                    #vlocr = read_vloc_siesta("../Vloc/P.VT")
                     funch, funcg, projR = read_hrr(structure, upfdir, interface='qe')
                 else:
                     raise NotImplementedError(f'Unknown hrdata_interface {hrdata_interface}')
@@ -235,32 +234,52 @@ class PW2AOkernel:
         # orbpairs1 saves pairs of AO basis and AO basis
         # orbpairs2 saves pairs of projector basis and AO basis
         # orbpairs3 saves pairs of AO basis and AO basis, for kinetic energy
-        orbpairs1, orbpairs2, orbpairs3 = {}, {}, {}
+        # orbpairs4 saves position integral pairs of AO basis and AO basis
+        orbpairs1, orbpairs2, orbpairs3, orbpairs4 = {}, {}, {}, {}
         stru = self.structure
+        # r * phi_i uses the same Fourier transformed bra channels for each ket orbital
+        # precompute them once for each radial AO shell to avoid repeating in PosOrbPair
+        pos_bras = {}
+        for spc in stru.atomic_species:
+            pos_bras[spc] = []
+            for iorb in range(basis.norb_spc[spc]):
+                pos_bras[spc].append(
+                    prepare_position_bra(basis.phirgrids_spc[spc][iorb], 
+                                         basis.phiQlist_spc[spc][iorb].rgd)
+                )
         for ispc in range(stru.nspc):
             for jspc in range(stru.nspc):
                 spc1 = stru.atomic_species[ispc]
                 spc2 = stru.atomic_species[jspc]
-                orbpairs_thisij1, orbpairs_thisij2, orbpairs_thisij3 = [], [], []
+                orbpairs_thisij1, orbpairs_thisij2 = [], []
+                orbpairs_thisij3, orbpairs_thisij4 = [], []
                 for jorb in range(basis.norb_spc[spc2]):
                     r2 = basis.phirgrids_spc[spc2][jorb].rcut
                     for iorb in range(basis.norb_spc[spc1]):
                         r1 = basis.phirgrids_spc[spc1][iorb].rcut
                         thispair = OrbPair(basis.phiQlist_spc[spc1][iorb],
-                                            basis.phiQlist_spc[spc2][jorb], r1 + r2, 1)
+                                           basis.phiQlist_spc[spc2][jorb], 
+                                           r1 + r2, 1)
                         orbpairs_thisij1.append(thispair)
                         thispair = OrbPair(basis.phiQlist_spc[spc1][iorb],
-                                            basis.phiQlist_spc[spc2][jorb], r1 + r2, 2)
+                                           basis.phiQlist_spc[spc2][jorb], 
+                                           r1 + r2, 2)
                         orbpairs_thisij3.append(thispair)
+                        thispair = PosOrbPair(basis.phirgrids_spc[spc1][iorb],
+                                              basis.phiQlist_spc[spc2][jorb],
+                                              r1 + r2, bras=pos_bras[spc1][iorb])
+                        orbpairs_thisij4.append(thispair)
                     for iorb in range(projR.norb_spc[spc1]):
                         r1 = projR.phirgrids_spc[spc1][iorb].rcut
                         thispair = OrbPair(projR.phiQlist_spc[spc1][iorb],
-                                            basis.phiQlist_spc[spc2][jorb], r1 + r2, 1)
+                                           basis.phiQlist_spc[spc2][jorb], 
+                                           r1 + r2, 1)
                         thispair.grad_setup()
                         orbpairs_thisij2.append(thispair)
                 orbpairs1[(spc1, spc2)] = orbpairs_thisij1
                 orbpairs2[(spc1, spc2)] = orbpairs_thisij2
                 orbpairs3[(spc1, spc2)] = orbpairs_thisij3
+                orbpairs4[(spc1, spc2)] = orbpairs_thisij4
         
         if is_master(): print('Calculating overlap')
         olp_basis = calc_overlap(basis, orbpairs1, Ecut=ecut)
@@ -288,6 +307,25 @@ class PW2AOkernel:
         
         if self.overlaps_only:
             return
+
+        # Now calculate exact position matrix <0i|r|Rj>
+
+        pos_mat = calc_position(basis, orbpairs4, overlaps)
+        if is_master():
+            print('Writing position matrices to disk')
+            save_pos_deeph(savedir, pos_mat, filename='positions.h5')
+        '''
+        max_pos, max_nonmulliken, max_pos_cov_err, missing_pos_inverse = position_diagnostic(pos_mat, overlaps)
+        if is_master():
+            print(f'     max |<0i|r|Rj>| = {max_pos:.8e} Bohr')
+            print(f'     max |position - midpoint*S| = {max_nonmulliken:.8e} Bohr')
+            print(f'     missing (-R,j,i) position partners = {missing_pos_inverse:d}')
+            print(f'     max |r(R)-r(-R)^dagger-R*S(R)| = {max_pos_cov_err:.8e} Bohr')
+        '''
+
+        del pos_mat
+        del orbpairs4
+        del pos_bras
         
         # Now deal with Hamiltonians
         
