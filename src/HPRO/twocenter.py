@@ -90,17 +90,16 @@ def calc_overlap(lcaodata1, dictatuple, lcaodata2=None, Ecut=50):
     
     stru = lcaodata1.structure
 
-    '''
-    lcaodata1.calc_phiQ(Ecut)
-    if not is_selfolp:
-        lcaodata2.calc_phiQ(Ecut)
-    '''
-        
     pairs_ij = pwc(stru, lcaodata1.cutoffs, cutoffs2=lcaodata2.cutoffs)
     if is_selfolp:
-        overlaps = MatLCAO.setc(pairs_ij, lcaodata1, lcaodata2=lcaodata2, filling_value=None)
+        overlaps = MatLCAO.setc(
+            pairs_ij, lcaodata1, lcaodata2=lcaodata2, filling_value=None
+        )
     else:
-        overlaps = MatLCAO.setc_phiVdphi(pairs_ij, lcaodata1, lcaodata2=lcaodata2, filling_value=0.0, dtype='f8')
+        overlaps = MatLCAO.setc_phiVdphi(
+            pairs_ij, lcaodata1, lcaodata2=lcaodata2, filling_value=0.0,
+            dtype='f8', allocate_dphiVphi=False
+        )
     
     translations = overlaps.translations
     atom_pairs = overlaps.atom_pairs

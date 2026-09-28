@@ -1,10 +1,8 @@
 import numpy as np
-import copy
 import sys
 from scipy.sparse import csr_matrix
-
 from .constants import hpro_rng
-from .utils import atom_number2name
+from .utils import atom_number2name, slice_same
 
 BASE = 20
 
@@ -187,9 +185,9 @@ class MatLCAO(PairsInfo):
         return cls(pairs.structure, pairs.translations, pairs.atom_pairs, mats, lcaodata1, lcaodata2=lcaodata2, mats_phiVdphi=mats_phiVdphi, mats_dphiVphi=mats_dphiVphi)
 
     def exchange_phiVdphi(self):
-        mats_phiVdphi_bk = copy.deepcopy(self.mats_phiVdphi)
-        self.mats_phiVdphi = copy.deepcopy(self.mats_dphiVphi)
-        self.mats_dphiVphi = mats_phiVdphi_bk
+        self.mats_phiVdphi, self.mats_dphiVphi = (
+            self.mats_dphiVphi, self.mats_phiVdphi
+        )
 
     def clear_phiVdphi(self):
         self.mats_phiVdphi = None
@@ -267,9 +265,10 @@ class MatLCAO(PairsInfo):
         return cls.from_pairs(pairs, mats, lcaodata1, lcaodata2=lcaodata2)
     
     @classmethod
-    def setc_phiVdphi(cls, pairs, lcaodata1, lcaodata2=None, filling_value=0, dtype=np.complex128):
+    def setc_phiVdphi(cls, pairs, lcaodata1, lcaodata2=None, filling_value=0, 
+                      dtype=np.complex128, allocate_dphiVphi=True):
         """
-        Generate the MatLCAO object with proper error handling, together with <phi|V|dphi> and <dphi|V|phi>.
+        Generate a MatLCAO object together with gradient blocks.
         """
         if lcaodata2 is None:
             lcaodata2 = lcaodata1
@@ -281,12 +280,18 @@ class MatLCAO(PairsInfo):
                 size2 = lcaodata2.orbslices_spc[atom_nbrs[pairs.atom_pairs[ipair, 1]]][-1]
                 mats.append(np.full((size1, size2), filling_value, dtype=dtype))
                 mats_phiVdphi.append(np.full((size1, size2, 3), filling_value, dtype=dtype))
-                mats_dphiVphi.append(np.full((size1, size2, 3), filling_value, dtype=dtype))
+                if allocate_dphiVphi:
+                    mats_dphiVphi.append(np.full((size1, size2, 3), filling_value, dtype=dtype))
+                else:
+                    mats_dphiVphi.append(None)
             else:
                 mats.append(None)
                 mats_phiVdphi.append(None)
                 mats_dphiVphi.append(None)
-        return cls.from_pairs_phiVdphi(pairs, mats, lcaodata1, lcaodata2=lcaodata2, mats_phiVdphi=mats_phiVdphi, mats_dphiVphi=mats_dphiVphi)
+        return cls.from_pairs_phiVdphi(
+            pairs, mats, lcaodata1, lcaodata2=lcaodata2, 
+            mats_phiVdphi=mats_phiVdphi, mats_dphiVphi=mats_dphiVphi
+        )
 
     def delete_mats(self):
         self.mats = [None for _ in range(self.npairs)]
@@ -611,3 +616,112 @@ def pwc(structure, cutoffs, cutoffs2=None):
     translations = structure.trans_uc_to_original(translations, atom_pairs[:, 0], atom_pairs[:, 1])
     
     return PairsInfo(structure, translations, atom_pairs)
+
+
+def get_mat0(ao_data, funch=None):
+    for ih in range(len(funch)):
+        h = funch[ih]
+        if not np.isrealobj(h):
+            # Future: D is complex
+            assert np.max(np.abs(h.imag)) < 1e-8
+            funch[ih] = h.real
+    ao_data.sort_atom1()
+    translations = ao_data.translations
+    atom_pairs = ao_data.atom_pairs
+    trans, atoms, mats = [], [], []
+    mats_grad1, mats_grad2 = [], []
+    assert ao_data.mats_phiVdphi is not None
+    
+    slice_jatm = slice_same(atom_pairs[:, 0])
+    njatm = len(slice_jatm) - 1
+    for ix_atm in range(njatm):
+        startj = slice_jatm[ix_atm]
+        endj = slice_jatm[ix_atm + 1]
+        atomj = atom_pairs[startj, 0]
+        ix_js, ix_jps = np.tril_indices(endj - startj)
+        ix_js += startj; ix_jps += startj
+        trans.append(translations[ix_jps] - translations[ix_js])
+        atoms.append(np.stack((atom_pairs[ix_js, 1], atom_pairs[ix_jps, 1]), axis=1))
+        h = funch[atomj]
+        for ix_j, ix_jp in zip(ix_js, ix_jps):
+            mat = ao_data.mats[ix_j]
+            matp = ao_data.mats[ix_jp]
+            mat_grad1 = ao_data.mats_phiVdphi[ix_j]
+            mat_grad2 = ao_data.mats_phiVdphi[ix_jp]
+            mats.append(mat.T @ h @ matp)
+            mats_grad1.append(np.einsum('ipk,pq,qj->ijk', np.swapaxes(mat_grad1, 0, 1), h, matp, optimize=True))
+            mats_grad2.append(np.einsum('ip,pq,qjk->ijk', np.swapaxes(mat, 0, 1), h, mat_grad2, optimize=True))
+    trans = np.concatenate(trans, axis=0)
+    atoms = np.concatenate(atoms, axis=0)
+
+    return trans, atoms, mats, mats_grad1, mats_grad2
+
+
+def get_mats_kb(aodata, funch=None):
+    """
+    Build non-local Hkb blocks with direct pair-wise accumulation.
+    """
+    for ih in range(len(funch)):
+        h = funch[ih]
+        if not np.isrealobj(h):
+            assert np.max(np.abs(h.imag)) < 1e-8
+            funch[ih] = h.real
+    aodata.sort_atom1()
+    translations = aodata.translations
+    atom_pairs = aodata.atom_pairs
+    assert aodata.mats_phiVdphi is not None
+
+    accum = {}
+    slice_proj = slice_same(atom_pairs[:, 0])
+    for idx_slice in range(len(slice_proj) - 1):
+        start = slice_proj[idx_slice]
+        end = slice_proj[idx_slice + 1]
+        proj = atom_pairs[start, 0]
+        h = funch[proj]
+
+        for ii in range(end - start):
+            iatom = start + ii
+            for jj in range(ii + 1):
+                jatom = start + jj
+                trans = translations[jatom] - translations[iatom]
+                atoms = (int(atom_pairs[iatom, 1]), int(atom_pairs[jatom, 1]))
+                key = (int(trans[0]), int(trans[1]), int(trans[2]), atoms[0], atoms[1])
+                
+                mat1, mat2 = aodata.mats[iatom], aodata.mats[jatom]
+                grad1 = aodata.mats_phiVdphi[iatom]
+                grad2 = aodata.mats_phiVdphi[jatom]
+                
+                Hkb_block = mat1.T @ h @ mat2
+                g1_block = np.einsum(
+                    'ipk,pq,qj->ijk', np.swapaxes(grad1, 0, 1), h, mat2,
+                    optimize=True
+                )
+                g2_block = np.einsum(
+                    'ip,pq,qjk->ijk', np.swapaxes(mat1, 0, 1), h, grad2,
+                    optimize=True
+                )
+                
+                key_exist = accum.get(key)
+                if key_exist is None:
+                    accum[key] = [Hkb_block, g1_block, g2_block]
+                else:
+                    key_exist[0] += Hkb_block
+                    key_exist[1] += g1_block
+                    key_exist[2] += g2_block
+
+    keys = list(accum.keys())
+    trans = np.array([k[:3] for k in keys], dtype=np.int64)
+    atoms = np.array([k[3:] for k in keys], dtype=np.int64)
+    indices = pairs_to_indices(aodata.structure, trans, atoms)
+    order = np.argsort(indices, kind='stable')
+
+    trans = trans[order]
+    atoms = atoms[order]
+    mats, mats_grad1, mats_grad2 = [], [], []
+    for i in order:
+        vals = accum[keys[int(i)]]
+        mats.append(vals[0])
+        mats_grad1.append(vals[1])
+        mats_grad2.append(vals[2])
+
+    return trans, atoms, mats, mats_grad1, mats_grad2

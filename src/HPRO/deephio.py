@@ -6,9 +6,8 @@ from scipy.linalg import block_diag
 
 from .constants import bohr2ang, hartree2ev
 from .structure import Structure
-from .matlcao import MatLCAO
+from .matlcao import MatLCAO, pairs_to_indices
 from .lcaodata import LCAOData # this might be unsafe?
-from .utils import slice_same
 
 '''
 This module implemements several functions for reading and writing files in deeph format
@@ -56,35 +55,29 @@ def get_Us_openmx2wiki(ls_spc):
 
 def save_mat_deeph(savedir, matlcao, filename='hamiltonians.h5', energy_unit=True):
     lcaodata = matlcao.lcaodata1
-    # todo: check lcaodata1 == lcaodata2
-
     os.makedirs(savedir, exist_ok=True)
-
     atom_nbrs = lcaodata.structure.atomic_numbers
     ls_spc = lcaodata.ls_spc
-
     with open(f'{savedir}/orbital_types.dat', 'w') as f:
         for nspc in atom_nbrs:
             f.write(' '.join(map(str, ls_spc[nspc])))
             f.write('\n')
     
-    # here real spherical harmonics follow wikipedia convention, need to convert to openmx convension
-    
+    # here real spherical harmonics follow wikipedia convention
+    # need to convert to openmx convension
     orbitals_Us_openmx2wiki = get_Us_openmx2wiki(ls_spc)
-
     h5file = h5py.File(f'{savedir}/{filename}', 'w', libver='latest')
 
-    # from tqdm import tqdm
-    # for ipair in tqdm(range(matlcao.npairs)):
     for ipair in range(matlcao.npairs):
         spc1 = atom_nbrs[matlcao.atom_pairs[ipair, 0]]
         spc2 = atom_nbrs[matlcao.atom_pairs[ipair, 1]]
         key = matlcao.get_keystr(ipair)
-        mat = orbitals_Us_openmx2wiki[spc1].T @ matlcao.mats[ipair] @ orbitals_Us_openmx2wiki[spc2]
+        U1 = orbitals_Us_openmx2wiki[spc1]
+        U2 = orbitals_Us_openmx2wiki[spc2]
+        mat = U1.T @ matlcao.mats[ipair] @ U2
         if energy_unit:
             mat *= hartree2ev
         h5file[key] = mat
-    
     h5file.close()
 
 
@@ -93,6 +86,7 @@ def save_pos_deeph(savedir, matlcao, filename='positions.h5'):
     os.makedirs(savedir, exist_ok=True)
     atom_nbrs = lcaodata.structure.atomic_numbers
     ls_spc = lcaodata.ls_spc
+
     orbitals_Us_openmx2wiki = get_Us_openmx2wiki(ls_spc)
     h5file = h5py.File(f'{savedir}/{filename}', 'w', libver='latest')
 
@@ -102,9 +96,12 @@ def save_pos_deeph(savedir, matlcao, filename='positions.h5'):
         U1 = orbitals_Us_openmx2wiki[spc1]
         U2 = orbitals_Us_openmx2wiki[spc2]
         key = matlcao.get_keystr(ipair)
-        mat = np.einsum('ia,abk,bj->ijk', U1.T, matlcao.mats[ipair], U2, optimize=True)
+        mat = np.einsum(
+            'ia,abk,bj->ijk', 
+            U1.T, matlcao.mats[ipair], U2, 
+            optimize=True
+        )
         h5file[key] = mat
-
     h5file.close()
 
 
@@ -114,63 +111,24 @@ def save_phiVdphi_deeph(savedir, matlcao, filename='phiVdphi.h5', energy_unit=Tr
     atom_nbrs = lcaodata.structure.atomic_numbers
     ls_spc = lcaodata.ls_spc
     
-    # here real spherical harmonics follow wikipedia convention, need to convert to openmx convension
     orbitals_Us_openmx2wiki = get_Us_openmx2wiki(ls_spc)
     h5file = h5py.File(f'{savedir}/{filename}', 'w', libver='latest')
 
-    # from tqdm import tqdm
-    # for ipair in tqdm(range(matlcao.npairs)):
     for ipair in range(matlcao.npairs):
         spc1 = atom_nbrs[matlcao.atom_pairs[ipair, 0]]
         spc2 = atom_nbrs[matlcao.atom_pairs[ipair, 1]]
         U1 = orbitals_Us_openmx2wiki[spc1]
         U2 = orbitals_Us_openmx2wiki[spc2]
         key = matlcao.get_keystr(ipair)
-        mat = np.einsum('ia,abk,bj->ijk', U1.T, matlcao.mats_phiVdphi[ipair], U2)
+        mat = np.einsum(
+            'ia,abk,bj->ijk', 
+            U1.T, matlcao.mats_phiVdphi[ipair], U2,
+            optimize=True
+        )
         if energy_unit:
             mat *= hartree2ev / bohr2ang
         h5file[key] = mat
-    
     h5file.close()
-
-
-def get_mat0(ao_data, funch=None):
-    for ih in range(len(funch)):
-        h = funch[ih]
-        if not np.isrealobj(h):
-            # Future: D is complex
-            assert np.max(np.abs(h.imag)) < 1e-8
-            funch[ih] = h.real
-    ao_data.sort_atom1()
-    translations = ao_data.translations
-    atom_pairs = ao_data.atom_pairs
-    trans, atoms, mats = [], [], []
-    mats_grad1, mats_grad2 = [], []
-    assert ao_data.mats_phiVdphi is not None
-    
-    slice_jatm = slice_same(atom_pairs[:, 0])
-    njatm = len(slice_jatm) - 1
-    for ix_atm in range(njatm):
-        startj = slice_jatm[ix_atm]
-        endj = slice_jatm[ix_atm + 1]
-        atomj = atom_pairs[startj, 0]
-        ix_js, ix_jps = np.tril_indices(endj - startj)
-        ix_js += startj; ix_jps += startj
-        trans.append(translations[ix_jps] - translations[ix_js])
-        atoms.append(np.stack((atom_pairs[ix_js, 1], atom_pairs[ix_jps, 1]), axis=1))
-        h = funch[atomj]
-        for ix_j, ix_jp in zip(ix_js, ix_jps):
-            mat = ao_data.mats[ix_j]
-            matp = ao_data.mats[ix_jp]
-            mat_grad1 = ao_data.mats_phiVdphi[ix_j]
-            mat_grad2 = ao_data.mats_phiVdphi[ix_jp]
-            mats.append(mat.T @ h @ matp)
-            mats_grad1.append(np.einsum('ipk,pq,qj->ijk', np.swapaxes(mat_grad1, 0, 1), h, matp, optimize=True))
-            mats_grad2.append(np.einsum('ip,pq,qjk->ijk', np.swapaxes(mat, 0, 1), h, mat_grad2, optimize=True))
-    trans = np.concatenate(trans, axis=0)
-    atoms = np.concatenate(atoms, axis=0)
-
-    return trans, atoms, mats, mats_grad1, mats_grad2
 
 
 def load_deeph_HS(folder, filename, energy_unit=True):
@@ -202,5 +160,153 @@ def load_deeph_HS(folder, filename, energy_unit=True):
     return MatLCAO(stru, translations, atom_pairs, hoppings, lcaodata)
 
 
-def analyze_hdecay_deeph():
-    raise NotImplementedError()
+def transform_mat_block(mat, U1, U2, energy_unit=True):
+    out = U1.T @ mat @ U2
+    if energy_unit:
+        out *= hartree2ev
+    return out
+
+
+def transform_grad_block(mat, U1, U2, energy_unit=True):
+    out = np.einsum('ia,abk,bj->ijk', U1.T, mat, U2, optimize=True)
+    if energy_unit:
+        out *= hartree2ev / bohr2ang
+    return out
+
+
+def save_Hloc_shard(savedir, Hloc, pairs_idx, rank):
+    """
+    Write one rank-local Hloc shard without gathering dense blocks.
+    """
+    save_path = os.path.join(
+        savedir, '.ham_tmp', f'Hloc_rank{int(rank):04d}.h5'
+    )
+
+    lcaodata = Hloc.lcaodata1
+    stru = Hloc.structure
+    atom_nbrs = stru.atomic_numbers
+    Us = get_Us_openmx2wiki(lcaodata.ls_spc)
+    pairs_set = set(int(x) for x in np.asarray(pairs_idx).ravel())
+
+    translations_inv = -Hloc.translations
+    atom_pairs_inv = Hloc.atom_pairs[:, [1, 0]]
+    indices_inv = pairs_to_indices(stru, translations_inv, atom_pairs_inv)
+
+    with h5py.File(save_path, 'w', libver='latest') as f:
+        gh = f.create_group('Hloc')
+        gg = f.create_group('phiVdphi')
+
+        for ipair in range(Hloc.npairs):
+            ia, ja = Hloc.atom_pairs[ipair]
+            spc1, spc2 = atom_nbrs[ia], atom_nbrs[ja]
+            U1, U2 = Us[spc1], Us[spc2]
+            key = Hloc.get_keystr(ipair)
+            gh[key] = transform_mat_block(
+                Hloc.mats[ipair], U1, U2, 
+                energy_unit=True
+            )
+            gg[key] = transform_grad_block(
+                Hloc.mats_phiVdphi[ipair], U1, U2, 
+                energy_unit=True
+            )
+
+            # duplicate Hermitian partners without allocating blocks in memory
+            if int(indices_inv[ipair]) not in pairs_set:
+                Rijab = (
+                    translations_inv[ipair].tolist()
+                    + (atom_pairs_inv[ipair] + 1).tolist()
+                )
+                key_inv = str(Rijab)
+                gh[key_inv] = transform_mat_block(
+                    Hloc.mats[ipair].T, U2, U1, 
+                    energy_unit=True
+                )
+                grad_inv = np.swapaxes(
+                    Hloc.mats_dphiVphi[ipair], 0, 1
+                )
+                gg[key_inv] = transform_grad_block(
+                    grad_inv, U2, U1, 
+                    energy_unit=True
+                )
+
+
+def merge_Hloc_shard(savedir, nranks):
+    """
+    Merge rank-local Hloc shards using only one dense block at a time.
+    Returns a temporary full Hloc file in DeepH convention.
+    """
+    tmpdir = os.path.join(savedir, '.ham_tmp')
+    Hloc_path = os.path.join(tmpdir, 'Hloc.h5')
+    grad_path = os.path.join(savedir, 'phiVdphi.h5')
+
+    with h5py.File(Hloc_path, 'w', libver='latest') as hout, \
+         h5py.File(grad_path, 'w', libver='latest') as gout:
+        for rank in range(nranks):
+            shard = os.path.join(tmpdir, f'Hloc_rank{rank:04d}.h5')
+            if not os.path.exists(shard):
+                raise FileNotFoundError(f'Missing Hloc shard: {shard}')
+            with h5py.File(shard, 'r') as src:
+                for key in src['Hloc'].keys():
+                    if key in hout:
+                        raise RuntimeError(f'Duplicate distributed Hloc key: {key}')
+                    hout[key] = src['Hloc'][key][...]
+                for key in src['phiVdphi'].keys():
+                    if key in gout:
+                        raise RuntimeError(f'Duplicate distributed grad key: {key}')
+                    gout[key] = src['phiVdphi'][key][...]
+            os.remove(shard)
+
+
+def assemble_ham(savedir, lcaodata, final_pairs=None, filename='hamiltonians.h5'):
+    """Stream the final H = Hmain + Hkin + Hkb directly between HDF5 files.
+
+    All three source files are already in eV and OpenMX/DeepH orbital
+    convention.  Only one AO block is resident while summing.  If
+    ``final_pairs`` is supplied (the user cutoff case), exactly that pair set is
+    written and missing source blocks remain zero, matching MatLCAO.convert_to.
+    """
+    Hloc_path = os.path.join(savedir, '.ham_tmp', 'Hloc.h5')
+    Hkin_path = os.path.join(savedir, 'kinetics.h5')
+    Hkb_path = os.path.join(savedir, 'Hkb.h5')
+    out_path = os.path.join(savedir, filename)
+
+    atom_nbrs = lcaodata.structure.atomic_numbers
+    with open(os.path.join(savedir, 'orbital_types.dat'), 'w') as f_orb:
+        for nspc in atom_nbrs:
+            f_orb.write(' '.join(map(str, lcaodata.ls_spc[nspc])))
+            f_orb.write('\n')
+
+    with h5py.File(Hloc_path, 'r') as floc, \
+         h5py.File(Hkin_path, 'r') as fkin, \
+         h5py.File(Hkb_path, 'r') as fkb, \
+         h5py.File(out_path, 'w', libver='latest') as fout:
+        
+        if final_pairs is None:
+            keys = sorted(set(floc.keys()) | set(fkin.keys()) | set(fkb.keys()))
+            pair_meta = None
+        else:
+            keys = [final_pairs.get_keystr(i) for i in range(final_pairs.npairs)]
+            pair_meta = final_pairs
+
+        for kk, key in enumerate(keys):
+            total = None
+            for src in (floc, fkin, fkb):
+                if key in src:
+                    block = src[key][...]
+                    if total is None:
+                        total = block
+                    else:
+                        total += block
+            
+            if total is None:
+                assert pair_meta is not None
+                ia, ja = pair_meta.atom_pairs[kk]
+                spc1, spc2 = atom_nbrs[ia], atom_nbrs[ja]
+                norb1 = lcaodata.orbslices_spc[spc1][-1]
+                norb2 = lcaodata.orbslices_spc[spc2][-1]
+                total = np.zeros((norb1, norb2), dtype=np.float64)
+
+            fout[key] = total
+
+    os.remove(Hloc_path)
+    os.rmdir(os.path.dirname(Hloc_path))
