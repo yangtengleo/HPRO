@@ -73,8 +73,8 @@ def _get_P_ZP_cache(l: int):
     P  = _P_CACHE.get(l)
     ZP = _ZP_CACHE.get(l)
     if P is None:
-        P  = np.empty((l+2, l+2), dtype='f8')
-        ZP = np.empty((l+1, l+1), dtype='f8')
+        P  = np.zeros((l+2, l+2), dtype='f8')
+        ZP = np.zeros((l+1, l+1), dtype='f8')
         _P_CACHE[l]  = P
         _ZP_CACHE[l] = ZP
     return P, ZP
@@ -145,6 +145,7 @@ def rly_grly_single(l, r, x, y, z, tiny=1e-14):
     cosphi, sinphi = xhat*inv_xy, yhat*inv_xy
     # recursively calculate P(l,m) and its angular derivatives ZP(l,m)
     P, ZP = _get_P_ZP_cache(l)
+    P[l, l+1] = 0.0
     for M in range(l, -1, -1):
         P[M, M] = 1.0
         fac = 1.0

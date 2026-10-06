@@ -182,6 +182,13 @@ def save_Hloc_shard(savedir, Hloc, pairs_idx, rank):
         savedir, '.ham_tmp', f'Hloc_rank{int(rank):04d}.h5'
     )
 
+    # Empty MPI rank still creates a valid empty shard and returns early
+    if Hloc.npairs == 0:
+        with h5py.File(save_path, 'w', libver='latest') as f:
+            f.create_group('Hloc')
+            f.create_group('phiVdphi')
+        return
+
     lcaodata = Hloc.lcaodata1
     stru = Hloc.structure
     atom_nbrs = stru.atomic_numbers

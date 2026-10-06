@@ -9,7 +9,7 @@ from scipy.interpolate import CubicSpline
 import scipy.special as sp
 
 from .structure import Structure
-from .from_gpaw.gaunt import gaunt
+from .from_gpaw.gaunt import gaunt, gaunt_pair
 from .mathutils import r_to_xyz, spbessel_transfrorm, spharm_xyz, grad_spharm_xyz
 
 # == radial grids ==
@@ -387,13 +387,12 @@ class OrbPair:
         assert rgrid1.rgd == rgrid2.rgd
         l1 = rgrid1.l
         l2 = rgrid2.l
-        l3 = max(l1, l2)
-        self.lmax = l3
+        self.lmax = l1 + l2
         
-        Sl = np.empty((2*l3+1, gridR.npoints))
+        Sl = np.empty((self.lmax + 1, gridR.npoints))
         for iR in range(gridR.npoints):
             R = gridR.rfunc[iR]
-            for yy in range(0, 2*l3+1):
+            for yy in range(0, self.lmax + 1):
                 kr = gridQ.rfunc * R
                 j_l = sp.spherical_jn(yy, kr)
                 xx = (-1)**((l1-l2-yy)//2) / (2*pi**2)
@@ -403,20 +402,20 @@ class OrbPair:
                     Sl[yy, iR] = gridQ.sips(j_l*rgrid1.func*rgrid2.func, n=4) * xx/2
                 
         Sl_grids = []
-        for yy in range(0, 2*l3+1):
+        for yy in range(0, self.lmax + 1):
             func = GridFunc(gridR, Sl[yy], l=yy)
             func.calc_generator()
             Sl_grids.append(func)
 
         self.l1 = l1
         self.l2 = l2
-        self.gamma = gaunt(l3)[0:(2*l3+1)**2, l1**2:(l1+1)**2, l2**2:(l2+1)**2]
+        self.gamma = gaunt_pair(l1, l2)
         self.Sl_grids = Sl_grids
         self.grad_Sl_grids = None
 
     def grad_setup(self):
         self.grad_Sl_grids = []
-        for yy in range(0, 2*self.lmax+1):
+        for yy in range(0, self.lmax + 1):
             grad_Sl = copy.deepcopy(self.Sl_grids[yy].func)
             if yy != 0:
                 grad_Sl[1:] /= np.power(self.Sl_grids[yy].rgd.rfunc[1:], yy)
@@ -426,9 +425,9 @@ class OrbPair:
             self.grad_Sl_grids.append(func)
 
     def calc(self, Rnorm, x, y, z):
-        Sl_Ylm = np.empty((Rnorm.shape[0], (2*self.lmax+1)**2))
+        Sl_Ylm = np.empty((Rnorm.shape[0], (self.lmax + 1)**2))
         pos = 0
-        for l in range(0, 2*self.lmax+1):
+        for l in range(0, self.lmax + 1):
             Sl_Ylm[:, pos:pos+2*l+1] = self.Sl_grids[l].generate3D_norm_check(Rnorm, x, y, z)
             pos += 2 * l + 1
         Sl_3D = np.sum(self.gamma[None, :, :, :] * 
@@ -437,9 +436,9 @@ class OrbPair:
 
     def calc_grad(self, Rnorm, x, y, z):
         assert self.grad_Sl_grids is not None
-        grad_Sl_Ylm = np.empty((Rnorm.shape[0], (2*self.lmax+1)**2, 3))
+        grad_Sl_Ylm = np.empty((Rnorm.shape[0], (self.lmax + 1)**2, 3))
         pos = 0
-        for l in range(0, 2*self.lmax+1):
+        for l in range(0, self.lmax + 1):
             grad_Sl_Ylm[:, pos:pos+2*l+1, :] = self.grad_Sl_grids[l].generate3D_grad_norm_check(Rnorm, x, y, z)
             pos += 2 * l + 1
         grad_Sl_3D = np.sum(self.gamma[None, :, :, :, None] * 
