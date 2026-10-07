@@ -74,12 +74,13 @@ class TwoCenterIntgSplines:
         return SR_lm_lm.reshape(rshape0 + (2*self.l1+1, 2*self.l2+1))
 
 
-def calc_overlap(lcaodata1, dictatuple, lcaodata2=None, Ecut=50):
+def calc_overlap(lcaodata1, dictatuple, lcaodata2=None, Ecut=50, compute_pulay=True):
     '''
-    Calculate the overlap matrices.
+    Calculate overlap matrices.
 
     Parameters:
-        Ecut: cutoff energy of radial grid in reciprocal space, in Hartree
+        Ecut: cutoff energy of radial grid in reciprocal space, in Hartree.
+        compute_pulay: only relevant for projector-AO overlap.
     '''
 
     is_selfolp = lcaodata2 is None
@@ -91,9 +92,11 @@ def calc_overlap(lcaodata1, dictatuple, lcaodata2=None, Ecut=50):
     stru = lcaodata1.structure
 
     pairs_ij = pwc(stru, lcaodata1.cutoffs, cutoffs2=lcaodata2.cutoffs)
-    if is_selfolp:
+    need_grad = (not is_selfolp) and compute_pulay
+    if not need_grad:
         overlaps = MatLCAO.setc(
-            pairs_ij, lcaodata1, lcaodata2=lcaodata2, filling_value=None
+            pairs_ij, lcaodata1, lcaodata2=lcaodata2, 
+            filling_value=None if is_selfolp else 0.0, dtype='f8'
         )
     else:
         overlaps = MatLCAO.setc_phiVdphi(
@@ -104,7 +107,6 @@ def calc_overlap(lcaodata1, dictatuple, lcaodata2=None, Ecut=50):
     translations = overlaps.translations
     atom_pairs = overlaps.atom_pairs
     spc_pairs = stru.atomic_numbers[atom_pairs]
-    
     slices_ij = slice_same(spc_pairs[:, 0] * 200 + spc_pairs[:, 1])
     
     for ix_ij in range(len(slices_ij) - 1):
@@ -117,28 +119,33 @@ def calc_overlap(lcaodata1, dictatuple, lcaodata2=None, Ecut=50):
         size1 = lcaodata1.orbslices_spc[spc1][-1]
         size2 = lcaodata2.orbslices_spc[spc2][-1]
         S_thisij = np.empty((nthisij, size1, size2))
-        grad_S_thisij = None if is_selfolp else np.empty((nthisij, size1, size2, 3))
+        grad_S_thisij = (
+            np.empty((nthisij, size1, size2, 3)) if need_grad else None
+        )
         
         pos_ij = stru.atomic_positions_cart[atom_pairs[thisij, :]]
-        Rs_thisij = (translations[thisij, :] @ stru.rprim + pos_ij[:, 1] - pos_ij[:, 0]).reshape(-1, 3)
+        Rs_thisij = (
+            translations[thisij, :] @ stru.rprim + 
+            pos_ij[:, 1] - pos_ij[:, 0]
+        ).reshape(-1, 3)
         Rnorm, x, y, z = r_to_xyz(Rs_thisij)
         orbpairs_thisij = dictatuple[(spc1, spc2)]
         ix_orbpair = 0
         for jorb in range(lcaodata2.norb_spc[spc2]):
             for iorb in range(lcaodata1.norb_spc[spc1]):
                 slice1 = slice(lcaodata1.orbslices_spc[spc1][iorb],
-                               lcaodata1.orbslices_spc[spc1][iorb+1])
+                               lcaodata1.orbslices_spc[spc1][iorb + 1])
                 slice2 = slice(lcaodata2.orbslices_spc[spc2][jorb],
-                               lcaodata2.orbslices_spc[spc2][jorb+1])
+                               lcaodata2.orbslices_spc[spc2][jorb + 1])
                 orbpair = orbpairs_thisij[ix_orbpair]
                 S_thisij[:, slice1, slice2] = orbpair.calc(Rnorm, x, y, z)
-                if not is_selfolp:
+                if need_grad:
                     grad_S_thisij[:, slice1, slice2, :] = orbpair.calc_grad(Rnorm, x, y, z)
                 ix_orbpair += 1
         
         for ii in range(nthisij):
             overlaps.mats[start_ij + ii] = S_thisij[ii]
-            if not is_selfolp:
+            if need_grad:
                 overlaps.mats_phiVdphi[start_ij + ii] = grad_S_thisij[ii]
     
     if is_selfolp:

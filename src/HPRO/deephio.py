@@ -174,7 +174,7 @@ def transform_grad_block(mat, U1, U2, energy_unit=True):
     return out
 
 
-def save_Hloc_shard(savedir, Hloc, pairs_idx, rank):
+def save_Hloc_shard(savedir, Hloc, pairs_idx, rank, save_pulay=True):
     """
     Write one rank-local Hloc shard without gathering dense blocks.
     """
@@ -186,7 +186,8 @@ def save_Hloc_shard(savedir, Hloc, pairs_idx, rank):
     if Hloc.npairs == 0:
         with h5py.File(save_path, 'w', libver='latest') as f:
             f.create_group('Hloc')
-            f.create_group('phiVdphi')
+            if save_pulay:
+                f.create_group('phiVdphi')
         return
 
     lcaodata = Hloc.lcaodata1
@@ -201,7 +202,7 @@ def save_Hloc_shard(savedir, Hloc, pairs_idx, rank):
 
     with h5py.File(save_path, 'w', libver='latest') as f:
         gh = f.create_group('Hloc')
-        gg = f.create_group('phiVdphi')
+        gg = f.create_group('phiVdphi') if save_pulay else None
 
         for ipair in range(Hloc.npairs):
             ia, ja = Hloc.atom_pairs[ipair]
@@ -212,10 +213,11 @@ def save_Hloc_shard(savedir, Hloc, pairs_idx, rank):
                 Hloc.mats[ipair], U1, U2, 
                 energy_unit=True
             )
-            gg[key] = transform_grad_block(
-                Hloc.mats_phiVdphi[ipair], U1, U2, 
-                energy_unit=True
-            )
+            if save_pulay:
+                gg[key] = transform_grad_block(
+                    Hloc.mats_phiVdphi[ipair], U1, U2, 
+                    energy_unit=True
+                )
 
             # duplicate Hermitian partners without allocating blocks in memory
             if int(indices_inv[ipair]) not in pairs_set:
@@ -228,16 +230,17 @@ def save_Hloc_shard(savedir, Hloc, pairs_idx, rank):
                     Hloc.mats[ipair].T, U2, U1, 
                     energy_unit=True
                 )
-                grad_inv = np.swapaxes(
-                    Hloc.mats_dphiVphi[ipair], 0, 1
-                )
-                gg[key_inv] = transform_grad_block(
-                    grad_inv, U2, U1, 
-                    energy_unit=True
-                )
+                if save_pulay:
+                    grad_inv = np.swapaxes(
+                        Hloc.mats_dphiVphi[ipair], 0, 1
+                    )
+                    gg[key_inv] = transform_grad_block(
+                        grad_inv, U2, U1, 
+                        energy_unit=True
+                    )
 
 
-def merge_Hloc_shard(savedir, nranks):
+def merge_Hloc_shard(savedir, nranks, save_pulay=True):
     """
     Merge rank-local Hloc shards using only one dense block at a time.
     Returns a temporary full Hloc file in DeepH convention.
@@ -246,25 +249,39 @@ def merge_Hloc_shard(savedir, nranks):
     Hloc_path = os.path.join(tmpdir, 'Hloc.h5')
     grad_path = os.path.join(savedir, 'phiVdphi.h5')
 
-    with h5py.File(Hloc_path, 'w', libver='latest') as hout, \
-         h5py.File(grad_path, 'w', libver='latest') as gout:
-        for rank in range(nranks):
-            shard = os.path.join(tmpdir, f'Hloc_rank{rank:04d}.h5')
-            if not os.path.exists(shard):
-                raise FileNotFoundError(f'Missing Hloc shard: {shard}')
-            with h5py.File(shard, 'r') as src:
-                for key in src['Hloc'].keys():
-                    if key in hout:
-                        raise RuntimeError(f'Duplicate distributed Hloc key: {key}')
-                    hout[key] = src['Hloc'][key][...]
-                for key in src['phiVdphi'].keys():
-                    if key in gout:
-                        raise RuntimeError(f'Duplicate distributed grad key: {key}')
-                    gout[key] = src['phiVdphi'][key][...]
-            os.remove(shard)
+    if save_pulay:
+        with h5py.File(Hloc_path, 'w', libver='latest') as hout, \
+             h5py.File(grad_path, 'w', libver='latest') as gout:
+            for rank in range(nranks):
+                shard = os.path.join(tmpdir, f'Hloc_rank{rank:04d}.h5')
+                if not os.path.exists(shard):
+                    raise FileNotFoundError(f'Missing Hloc shard: {shard}')
+                with h5py.File(shard, 'r') as src:
+                    for key in src['Hloc'].keys():
+                        if key in hout:
+                            raise RuntimeError(f'Duplicate distributed Hloc key: {key}')
+                        hout[key] = src['Hloc'][key][...]
+                    for key in src['phiVdphi'].keys():
+                        if key in gout:
+                            raise RuntimeError(f'Duplicate distributed grad key: {key}')
+                        gout[key] = src['phiVdphi'][key][...]
+                os.remove(shard)
+    else:
+        with h5py.File(Hloc_path, 'w', libver='latest') as hout:
+            for rank in range(nranks):
+                shard = os.path.join(tmpdir, f'Hloc_rank{rank:04d}.h5')
+                if not os.path.exists(shard):
+                    raise FileNotFoundError(f'Missing Hloc shard: {shard}')
+                with h5py.File(shard, 'r') as src:
+                    for key in src['Hloc'].keys():
+                        if key in hout:
+                            raise RuntimeError(f'Duplicate distributed Hloc key: {key}')
+                        hout[key] = src['Hloc'][key][...]
+                os.remove(shard)
 
 
-def assemble_ham(savedir, lcaodata, final_pairs=None, filename='hamiltonians.h5'):
+def assemble_ham(savedir, lcaodata, final_pairs=None, 
+                 filename='hamiltonians.h5', remove_Hkb=False):
     """Stream the final H = Hmain + Hkin + Hkb directly between HDF5 files.
 
     All three source files are already in eV and OpenMX/DeepH orbital
@@ -274,7 +291,10 @@ def assemble_ham(savedir, lcaodata, final_pairs=None, filename='hamiltonians.h5'
     """
     Hloc_path = os.path.join(savedir, '.ham_tmp', 'Hloc.h5')
     Hkin_path = os.path.join(savedir, 'kinetics.h5')
-    Hkb_path = os.path.join(savedir, 'Hkb.h5')
+    if not remove_Hkb:
+        Hkb_path = os.path.join(savedir, 'Hkb.h5')
+    else:
+        Hkb_path = os.path.join(savedir, '.ham_tmp', 'Hkb.h5')
     out_path = os.path.join(savedir, filename)
 
     atom_nbrs = lcaodata.structure.atomic_numbers
@@ -316,4 +336,6 @@ def assemble_ham(savedir, lcaodata, final_pairs=None, filename='hamiltonians.h5'
             fout[key] = total
 
     os.remove(Hloc_path)
+    if remove_Hkb:
+        os.remove(Hkb_path)
     os.rmdir(os.path.dirname(Hloc_path))

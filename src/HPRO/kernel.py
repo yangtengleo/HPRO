@@ -174,7 +174,7 @@ class PW2AOkernel:
     
     @mpi_watch
     @simple_timer('\nJob done, total wall time = {t}\n')
-    def run_pw2ao_rs(self, savedir, cutoffs=None):
+    def run_pw2ao_rs(self, savedir, cutoffs=None, compute_pulay=True):
         '''
         Convert plane-wave Hamiltonian to atomic orbital basis by integration in real space.
         The expensive local potential grid integral is distributed by AO pair blocks among ranks.
@@ -182,13 +182,19 @@ class PW2AOkernel:
 
         Parameters:
         ---------
-        savedir:    place where result will be saved.
-        cutoffs:    Dict[str -> float], cutoff radius for each atomic species, in bohr. 
-                    If not provided, the code will decide which hoppings are nonzero by considering 
-                    the cutoff of the pseudopotential region and the cutoff of atomic orbitals.
+        savedir:    str
+            Place where the reconstruction result is saved.
+        cutoffs:    dict[str -> float], optional
+            Cutoff radius for each atomic species, in Bohr. 
+            If not provided, non-zero hoppings are determined by the cutoff of pseudopotential
+            region and atomic orbitals.
+        compute_pulay:     bool, optional
+            Whether to compute Pulay corrections. Default is True.
         '''
+        compute_pulay = bool(compute_pulay)
         rank = 0 if comm is None else comm.rank
         nranks = 1 if comm is None else comm.size
+
         if is_master():
             if self.overlaps_only:
                 print('\n============================')
@@ -198,7 +204,14 @@ class PW2AOkernel:
                 print('\n===============================================')
                 print('Reconstructing PW Hamiltonian to AOs in real space')
                 print('===============================================\n')
+                if not compute_pulay:
+                    print('Pulay corrections disabled:\n')
 
+        if self.overlaps_only and not compute_pulay:
+            raise ValueError(
+                'compute_pulay=False is incompatible with overlaps_only=True'
+            )
+        
         assert self.ecutwfn is not None, 'Must provide cutoff energy ecutwfn'
         assert self.hrdata is not None
         vlocr, funch, funcg, projR = self.hrdata
@@ -217,58 +230,21 @@ class PW2AOkernel:
 
         pairs_meta = None
         if is_master():
-            basis.calc_phiQ(ecut * 1.1)
-            # orbpairs1 saves pairs of AO basis and AO basis
-            orbpairs1 = {}
-            for spc1 in stru.atomic_species:
-                for spc2 in stru.atomic_species:
-                    pairs_this = []
-                    for jorb in range(basis.norb_spc[spc2]):
-                        r2 = basis.phirgrids_spc[spc2][jorb].rcut
-                        for iorb in range(basis.norb_spc[spc1]):
-                            r1 = basis.phirgrids_spc[spc1][iorb].rcut
-                            pairs_this.append(OrbPair(
-                                basis.phiQlist_spc[spc1][iorb],
-                                basis.phiQlist_spc[spc2][jorb],
-                                r1 + r2, 1
-                            ))
-                    orbpairs1[(spc1, spc2)] = pairs_this
-            print('Calculating overlap matrix')
-            overlaps = calc_overlap(basis, orbpairs1, Ecut=ecut)
-            del orbpairs1
-
-            # broadcast only light-weighted metadata from root rank to workers
-            pairs_ij = overlaps.get_pairs_ij()
-            pairs_meta = (
-                pairs_ij.translations.copy(),
-                pairs_ij.atom_pairs.copy(),
-            )
-
-            if cutoffs is not None:
-                pairs_cut = pwc(self.structure, cutoffs)
-                overlaps_cut = MatLCAO.setc(
-                    pairs_cut, basis, filling_value=0., dtype='f8'
+            if not compute_pulay:
+                pairs_ij = pwc(self.structure, basis.cutoffs)
+                pairs_ij.remove_ji()
+                pairs_meta = (
+                    pairs_ij.translations.copy(),
+                    pairs_ij.atom_pairs.copy()
                 )
-                overlaps_cut.convert_to(overlaps)
-                overlaps = overlaps_cut
-
-            print('\nWriting overlap matrix to disk')
-            save_mat_deeph(savedir, overlaps, filename='overlaps.h5', energy_unit=False)
-
-            if not self.overlaps_only:
-                # r * phi_i uses the same reciprocal bra channels for each ket orbital
-                # precompute them only once for each radial AO shell
-                pos_bras = {}
-                for spc in stru.atomic_species:
-                    pos_bras[spc] = []
-                    for iorb in range(basis.norb_spc[spc]):
-                        pos_bras[spc].append(prepare_position_bra(
-                            basis.phirgrids_spc[spc][iorb], 
-                            basis.phiQlist_spc[spc][iorb].rgd
-                        ))
-
-                # orbpairs2 saves position integral pairs of AO basis and AO basis
-                orbpairs2 = {}
+                if cutoffs is not None:
+                    pairs_cut = pwc(self.structure, cutoffs)
+                del pairs_ij
+            
+            else:
+                basis.calc_phiQ(ecut * 1.1)
+                # orbpairs1 saves pairs of AO basis and AO basis
+                orbpairs1 = {}
                 for spc1 in stru.atomic_species:
                     for spc2 in stru.atomic_species:
                         pairs_this = []
@@ -276,23 +252,72 @@ class PW2AOkernel:
                             r2 = basis.phirgrids_spc[spc2][jorb].rcut
                             for iorb in range(basis.norb_spc[spc1]):
                                 r1 = basis.phirgrids_spc[spc1][iorb].rcut
-                                pairs_this.append(PosOrbPair(
-                                    basis.phirgrids_spc[spc1][iorb],
+                                pairs_this.append(OrbPair(
+                                    basis.phiQlist_spc[spc1][iorb],
                                     basis.phiQlist_spc[spc2][jorb],
-                                    r1 + r2,
-                                    bras=pos_bras[spc1][iorb]
+                                    r1 + r2, 1
                                 ))
-                        orbpairs2[(spc1, spc2)] = pairs_this
-                
-                positions = calc_position(basis, orbpairs2, overlaps)
-                print('\nWriting position matrix to disk')
-                save_pos_deeph(savedir, positions, filename='positions.h5')
-                del positions, orbpairs2, pos_bras
+                        orbpairs1[(spc1, spc2)] = pairs_this
+                print('Calculating overlap matrix')
+                overlaps = calc_overlap(basis, orbpairs1, Ecut=ecut)
+                del orbpairs1
 
-            del overlaps
-            if cutoffs is not None:
-                del overlaps_cut
-            del pairs_ij
+                # broadcast only light-weighted metadata from root rank to workers
+                pairs_ij = overlaps.get_pairs_ij()
+                pairs_meta = (
+                    pairs_ij.translations.copy(),
+                    pairs_ij.atom_pairs.copy()
+                )
+
+                if cutoffs is not None:
+                    pairs_cut = pwc(self.structure, cutoffs)
+                    overlaps_cut = MatLCAO.setc(
+                        pairs_cut, basis, filling_value=0., dtype='f8'
+                    )
+                    overlaps_cut.convert_to(overlaps)
+                    overlaps = overlaps_cut
+
+                print('\nWriting overlap matrix to disk')
+                save_mat_deeph(savedir, overlaps, filename='overlaps.h5', energy_unit=False)
+
+                if not self.overlaps_only:
+                    # r * phi_i uses the same reciprocal bra channels for each ket orbital
+                    # precompute them only once for each radial AO shell
+                    pos_bras = {}
+                    for spc in stru.atomic_species:
+                        pos_bras[spc] = []
+                        for iorb in range(basis.norb_spc[spc]):
+                            pos_bras[spc].append(prepare_position_bra(
+                                basis.phirgrids_spc[spc][iorb], 
+                                basis.phiQlist_spc[spc][iorb].rgd
+                            ))
+
+                    # orbpairs2 saves position integral pairs of AO basis and AO basis
+                    orbpairs2 = {}
+                    for spc1 in stru.atomic_species:
+                        for spc2 in stru.atomic_species:
+                            pairs_this = []
+                            for jorb in range(basis.norb_spc[spc2]):
+                                r2 = basis.phirgrids_spc[spc2][jorb].rcut
+                                for iorb in range(basis.norb_spc[spc1]):
+                                    r1 = basis.phirgrids_spc[spc1][iorb].rcut
+                                    pairs_this.append(PosOrbPair(
+                                        basis.phirgrids_spc[spc1][iorb],
+                                        basis.phiQlist_spc[spc2][jorb],
+                                        r1 + r2,
+                                        bras=pos_bras[spc1][iorb]
+                                    ))
+                            orbpairs2[(spc1, spc2)] = pairs_this
+                
+                    positions = calc_position(basis, orbpairs2, overlaps)
+                    print('\nWriting position matrix to disk')
+                    save_pos_deeph(savedir, positions, filename='positions.h5')
+                    del positions, orbpairs2, pos_bras
+
+                del overlaps
+                if cutoffs is not None:
+                    del overlaps_cut
+                del pairs_ij
         
         if comm is not None:
             comm.Barrier()
@@ -316,7 +341,10 @@ class PW2AOkernel:
 
         # create temporary directory for each rank
         if is_master():
-            print(f'\nConstructing Hamiltonian with {pairs_ij.npairs} blocks on {nranks} MPI rank(s)')
+            print(
+                f'\nConstructing Hamiltonian with {pairs_ij.npairs} blocks '
+                f'on {nranks} MPI rank(s)'
+            )
             tmpdir = os.path.join(savedir, '.ham_tmp')
             if os.path.isdir(tmpdir):
                 shutil.rmtree(tmpdir)
@@ -326,6 +354,7 @@ class PW2AOkernel:
 
         # balance block-memory among ranks accoording to norb_i*norb_j scale
         # equal pair counts can still produce imbalanced ranks with multi species
+        storage_factor = 7 if compute_pulay else 1
         block_bytes = np.empty(pairs_ij.npairs, dtype=np.int64)
         for ipair in range(pairs_ij.npairs):
             ia, ja = pairs_ij.atom_pairs[ipair]
@@ -333,7 +362,7 @@ class PW2AOkernel:
             spc2 = self.structure.atomic_numbers[ja]
             norb1 = basis.orbslices_spc[spc1][-1]
             norb2 = basis.orbslices_spc[spc2][-1]
-            block_bytes[ipair] = 7 * norb1 * norb2 * np.dtype('f8').itemsize
+            block_bytes[ipair] = storage_factor * norb1 * norb2 * np.dtype('f8').itemsize
 
         owners = np.empty(pairs_ij.npairs, dtype=np.int32)
         rank_loads = np.zeros(nranks, dtype=np.int64)
@@ -377,21 +406,36 @@ class PW2AOkernel:
                     grids_site_orb.append(GridPoints.find(rprimFFT, rcut, poscart))
                 grids_site[ia] = grids_site_orb
 
-        Hloc_local = MatLCAO.setc_phiVdphi(
-            pairs_local, basis, filling_value=0., dtype='f8'
-        )
+        if compute_pulay:
+            Hloc_local = MatLCAO.setc_phiVdphi(
+                pairs_local, basis, filling_value=0., dtype='f8'
+            )
+        else:
+            Hloc_local = MatLCAO.setc(
+                pairs_local, basis, filling_value=0., dtype='f8'
+            )
         del pairs_local
-        construct_Hloc(self, vlocr, basis, FFTgrid, rprimFFT, dvol, grids_site, Hloc_local)
+
+        construct_Hloc(
+            self, vlocr, basis, FFTgrid, rprimFFT, dvol, 
+            grids_site, Hloc_local,
+            compute_pulay=compute_pulay
+        )
         del grids_site
-        save_Hloc_shard(savedir, Hloc_local, pairs_global_idx, rank)
+        save_Hloc_shard(
+            savedir, Hloc_local, pairs_global_idx, rank,
+            save_pulay=compute_pulay)
         del Hloc_local
         del pairs_global_idx
         if comm is not None:
             comm.Barrier()
 
         if is_master():
-            print('\nMerging distributed Hloc and writing phiVdphi matrix')
-            merge_Hloc_shard(savedir, nranks)
+            if compute_pulay:
+                print('\nMerging distributed Hloc and writing phiVdphi matrix')
+            else:
+                print('\nMerging distributed Hloc')
+            merge_Hloc_shard(savedir, nranks, save_pulay=compute_pulay)
         if comm is not None:
             comm.Barrier()
 
@@ -414,6 +458,8 @@ class PW2AOkernel:
 
         if is_master():
             assert funcg is None
+            if not compute_pulay:
+                basis.calc_phiQ(ecut * 1.1)
             
             # orbpairs3 saves pairs of AO basis and AO basis, for kinetics
             orbpairs3 = {}
@@ -452,11 +498,15 @@ class PW2AOkernel:
                                 basis.phiQlist_spc[spc2][jorb],
                                 r1 + r2, 1
                             )
-                            pair.grad_setup()
+                            if compute_pulay:
+                                pair.grad_setup()
                             pairs_this.append(pair)
                     orbpairs4[(spc1, spc2)] = pairs_this
 
-            olp_proj_ao = calc_overlap(projR, orbpairs4, basis, Ecut=ecut)
+            olp_proj_ao = calc_overlap(
+                projR, orbpairs4, basis, 
+                Ecut=ecut, compute_pulay=compute_pulay
+            )
             del orbpairs4
 
             # release reciprocal grids of basis and projectors after two-center integrals
@@ -467,31 +517,49 @@ class PW2AOkernel:
         
             # mats stores the non-local potential of each atom pair,
             # accumulating the contributions of all KB projectors 
-            trans, atoms, mats, grad1, grad2 = get_mats_kb(olp_proj_ao, funch)
+            trans, atoms, mats, grad1, grad2 = get_mats_kb(
+                olp_proj_ao, funch,
+                compute_pulay=compute_pulay
+            )
             proj_structure = olp_proj_ao.structure
             proj_lcaodata2 = olp_proj_ao.lcaodata2
             del olp_proj_ao
 
-            Hkb = MatLCAO(
-                proj_structure, trans, atoms, mats, proj_lcaodata2,
-                mats_phiVdphi=grad2, mats_dphiVphi=grad1
-            )
+            if compute_pulay:
+                Hkb = MatLCAO(
+                    proj_structure, trans, atoms, mats, proj_lcaodata2,
+                    mats_phiVdphi=grad2, mats_dphiVphi=grad1
+                )
+            else:
+                Hkb = MatLCAO(
+                    proj_structure, trans, atoms, mats, proj_lcaodata2
+                )
             del trans, atoms, mats, grad1, grad2
-            Hkb.exchange_phiVdphi()
+            
+            if compute_pulay:
+                Hkb.exchange_phiVdphi()
             Hkb.duplicate()
 
-            print('\nWriting phiVkbdphi matrix to disk')
-            save_phiVdphi_deeph(savedir, Hkb, filename='phiVkbdphi.h5', energy_unit=True)
-            Hkb.clear_phiVdphi()
-            print('\nWriting Hkb matrix to disk')
-            save_mat_deeph(savedir, Hkb, filename='Hkb.h5', energy_unit=True)
+            if compute_pulay:
+                print('\nWriting phiVkbdphi matrix to disk')
+                save_phiVdphi_deeph(savedir, Hkb, filename='phiVkbdphi.h5', energy_unit=True)
+                Hkb.clear_phiVdphi()
+                print('\nWriting Hkb matrix to disk')
+                save_mat_deeph(savedir, Hkb, filename='Hkb.h5', energy_unit=True)
+                remove_Hkb = False
+            else:
+                print('\nWriting temporary Hkb matrix for final assembly')
+                name_Hkb = os.path.join('.ham_tmp', 'Hkb.h5')
+                save_mat_deeph(savedir, Hkb, filename=name_Hkb, energy_unit=True)
+                remove_Hkb = True
             del Hkb
 
             print('\nStreaming final Hamiltonian to disk')
             assemble_ham(
                 savedir, basis,
                 final_pairs=pairs_cut if cutoffs is not None else None,
-                filename='hamiltonians.h5'
+                filename='hamiltonians.h5',
+                remove_Hkb=remove_Hkb
             )
             if pairs_cut is not None:
                 del pairs_cut

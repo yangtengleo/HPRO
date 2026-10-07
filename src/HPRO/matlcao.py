@@ -657,7 +657,7 @@ def get_mat0(ao_data, funch=None):
     return trans, atoms, mats, mats_grad1, mats_grad2
 
 
-def get_mats_kb(aodata, funch=None):
+def get_mats_kb(aodata, funch=None, compute_pulay=True):
     """
     Build non-local Hkb blocks with direct pair-wise accumulation.
     """
@@ -669,7 +669,8 @@ def get_mats_kb(aodata, funch=None):
     aodata.sort_atom1()
     translations = aodata.translations
     atom_pairs = aodata.atom_pairs
-    assert aodata.mats_phiVdphi is not None
+    if compute_pulay:
+        assert aodata.mats_phiVdphi is not None
 
     accum = {}
     slice_proj = slice_same(atom_pairs[:, 0])
@@ -688,10 +689,17 @@ def get_mats_kb(aodata, funch=None):
                 key = (int(trans[0]), int(trans[1]), int(trans[2]), atoms[0], atoms[1])
                 
                 mat1, mat2 = aodata.mats[iatom], aodata.mats[jatom]
+                Hkb_block = mat1.T @ h @ mat2
+                key_exist = accum.get(key)
+                if not compute_pulay:
+                    if key_exist is None:
+                        accum[key] = Hkb_block
+                    else:
+                        key_exist += Hkb_block
+                    continue
+
                 grad1 = aodata.mats_phiVdphi[iatom]
                 grad2 = aodata.mats_phiVdphi[jatom]
-                
-                Hkb_block = mat1.T @ h @ mat2
                 g1_block = np.einsum(
                     'ipk,pq,qj->ijk', np.swapaxes(grad1, 0, 1), h, mat2,
                     optimize=True
@@ -700,8 +708,6 @@ def get_mats_kb(aodata, funch=None):
                     'ip,pq,qjk->ijk', np.swapaxes(mat1, 0, 1), h, grad2,
                     optimize=True
                 )
-                
-                key_exist = accum.get(key)
                 if key_exist is None:
                     accum[key] = [Hkb_block, g1_block, g2_block]
                 else:
@@ -717,11 +723,15 @@ def get_mats_kb(aodata, funch=None):
 
     trans = trans[order]
     atoms = atoms[order]
-    mats, mats_grad1, mats_grad2 = [], [], []
-    for i in order:
-        vals = accum[keys[int(i)]]
-        mats.append(vals[0])
-        mats_grad1.append(vals[1])
-        mats_grad2.append(vals[2])
 
-    return trans, atoms, mats, mats_grad1, mats_grad2
+    if compute_pulay:
+        mats, mats_grad1, mats_grad2 = [], [], []
+        for i in order:
+            vals = accum[keys[int(i)]]
+            mats.append(vals[0])
+            mats_grad1.append(vals[1])
+            mats_grad2.append(vals[2])
+        return trans, atoms, mats, mats_grad1, mats_grad2
+    
+    mats = [accum[keys[int(i)]] for i in order]
+    return trans, atoms, mats, None, None

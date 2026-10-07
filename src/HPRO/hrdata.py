@@ -120,13 +120,18 @@ def read_hrr(structure, pspdir, funchfile=None, interface='qe'):
     return funch, funcg, projR
 
 
-def construct_Hloc(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site, Hloc):
+def construct_Hloc(item, vlocr, basis, FFTgrid, rprimFFT, votk, 
+                   grids_site, Hloc, compute_pulay=True):
     '''
     Build Hamiltonian operator in atomic orbital basis according to the formula:
     H_{i\alpha,j\beta} = \langle \phi_{i\alpha} | -\frac{1}{2}\nabla^2 | \phi_{j\beta} \rangle + \int \mathrm{d}^3r\, \phi_{i\alpha}^*(\boldsymbol{r}) V_\text{eff}(\boldsymbol{r}) \phi_{j\beta}(\boldsymbol{r}) + \sum_{a\gamma\delta} \langle \phi_{i\alpha} | p_{a\gamma} \rangle D_{a\gamma\delta} \langle p_{a\delta} | \phi_{j\beta} \rangle
     '''
 
     npair = Hloc.npairs
+    if compute_pulay:
+        assert Hloc.mats_dphiVphi is not None
+        assert Hloc.mats_phiVdphi is not None
+
     for ipair in tqdm_mpi_tofile(range(npair), total=npair):
         atm1, atm2 = Hloc.atom_pairs[ipair]
         spc1 = item.structure.atomic_numbers[atm1]
@@ -134,54 +139,67 @@ def construct_Hloc(item, vlocr, basis, FFTgrid, rprimFFT, votk, grids_site, Hloc
 
         for iorb in range(basis.norb_spc[spc1]):
             phirgrid1 = basis.phirgrids_spc[spc1][iorb]
-            grad_phirgrid1 = basis.grad_phirgrids_spc[spc1][iorb]
+            grad_phirgrid1 = (
+                basis.grad_phirgrids_spc[spc1][iorb] if compute_pulay else None
+            )
             grid1 = grids_site[atm1][iorb]
 
             for jorb in range(basis.norb_spc[spc2]):
                 phirgrid2 = basis.phirgrids_spc[spc2][jorb]
-                grad_phirgrid2 = basis.grad_phirgrids_spc[spc2][jorb]
+                grad_phirgrid2 = (
+                    basis.grad_phirgrids_spc[spc2][jorb] if compute_pulay else None
+                )
                 slice1 = slice(basis.orbslices_spc[spc1][iorb],
-                               basis.orbslices_spc[spc1][iorb+1])
+                               basis.orbslices_spc[spc1][iorb + 1])
                 slice2 = slice(basis.orbslices_spc[spc2][jorb],
-                               basis.orbslices_spc[spc2][jorb+1])
-                grid2 = grids_site[atm2][jorb].translate(Hloc.translations[ipair]*FFTgrid)
+                               basis.orbslices_spc[spc2][jorb + 1])
+                grid2 = grids_site[atm2][jorb].translate(
+                    Hloc.translations[ipair] * FFTgrid
+                )
 
-                # plsgrid stores overlapping region of grid1 and grid2
+                # plsgrid stores the overlapping region of grid1 and grid2
                 plsgrid = GridPoints.pls(grid1, grid2)
                 if plsgrid.null():
-                    Hloc.mats[ipair][slice1, slice2] = 0.
-                    Hloc.mats_dphiVphi[ipair][slice1, slice2, :] = 0.
-                    Hloc.mats_phiVdphi[ipair][slice1, slice2, :] = 0.
+                    Hloc.mats[ipair][slice1, slice2] = 0.0
+                    if compute_pulay:
+                        Hloc.mats_dphiVphi[ipair][slice1, slice2, :] = 0.0
+                        Hloc.mats_phiVdphi[ipair][slice1, slice2, :] = 0.0
                     continue
 
                 # plslcd is (N, 3) array, where N is the number of overlapping grid points,
                 # each row is the point index (ix, iy, iz) in the global grid 
                 plslcd = plsgrid.lcd()
-                assert plslcd.shape[0]>0
-                assert len(plslcd.shape)==2
+                assert plslcd.shape[0] > 0
+                assert len(plslcd.shape) == 2
                 # transform point index to cartesian coordinates
                 plscrt = plslcd @ rprimFFT
                 
-                Rvec_atm1 = (plscrt - item.structure.atomic_positions_cart[atm1]).reshape(-1, 3)
-                Rnorm, x, y, z = r_to_xyz(Rvec_atm1)
-                phi1 = phirgrid1.generate3D_norm(Rnorm, x, y, z)
-                grad_phi1 = grad_phirgrid1.generate3D_grad_norm(Rnorm, x, y, z)
+                Rvec_atm1 = (
+                    plscrt - item.structure.atomic_positions_cart[atm1]
+                ).reshape(-1, 3)
+                Rnorm1, x1, y1, z1 = r_to_xyz(Rvec_atm1)
+                phi1 = phirgrid1.generate3D_norm(Rnorm1, x1, y1, z1)
 
-                Rvec_atm2 = (plscrt - item.structure.atomic_positions_cart[atm2] - 
-                             Hloc.translations[ipair] @ item.structure.rprim).reshape(-1, 3)
-                Rnorm, x, y, z = r_to_xyz(Rvec_atm2)
-                phi2 = phirgrid2.generate3D_norm(Rnorm, x, y, z)
-                grad_phi2 = grad_phirgrid2.generate3D_grad_norm(Rnorm, x, y, z)
+                Rvec_atm2 = (
+                    plscrt - item.structure.atomic_positions_cart[atm2] - 
+                    Hloc.translations[ipair] @ item.structure.rprim
+                ).reshape(-1, 3)
+                Rnorm2, x2, y2, z2 = r_to_xyz(Rvec_atm2)
+                phi2 = phirgrid2.generate3D_norm(Rnorm2, x2, y2, z2)
 
                 plslcd_uc = np.mod(plslcd, FFTgrid[None, :])
                 x_uc, y_uc, z_uc = plslcd_uc[:, 0], plslcd_uc[:, 1], plslcd_uc[:, 2]
                 f2 = vlocr[x_uc, y_uc, z_uc]
                 mat = np.einsum('n,ni,nj->ij', f2, phi1, phi2, optimize=True)
-                mat_dphiVphi = np.einsum('n,nik,nj->ijk', f2, grad_phi1, phi2, optimize=True)
-                mat_phiVdphi = np.einsum('n,ni,njk->ijk', f2, phi1, grad_phi2, optimize=True)
                 Hloc.mats[ipair][slice1, slice2] = mat * votk
-                Hloc.mats_dphiVphi[ipair][slice1, slice2, :] = mat_dphiVphi * votk
-                Hloc.mats_phiVdphi[ipair][slice1, slice2, :] = mat_phiVdphi * votk
+
+                if compute_pulay:
+                    grad_phi1 = grad_phirgrid1.generate3D_grad_norm(Rnorm1, x1, y1, z1)
+                    grad_phi2 = grad_phirgrid2.generate3D_grad_norm(Rnorm2, x2, y2, z2)
+                    mat_dphiVphi = np.einsum('n,nik,nj->ijk', f2, grad_phi1, phi2, optimize=True)
+                    mat_phiVdphi = np.einsum('n,ni,njk->ijk', f2, phi1, grad_phi2, optimize=True)
+                    Hloc.mats_dphiVphi[ipair][slice1, slice2, :] = mat_dphiVphi * votk
+                    Hloc.mats_phiVdphi[ipair][slice1, slice2, :] = mat_phiVdphi * votk
 
 
 def calc_vkb(olp_proj_ao, Dij=None):
